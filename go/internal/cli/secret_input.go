@@ -82,7 +82,7 @@ func readSecretLine(input io.Reader, label string) (string, error) {
 			done <- result{err: err}
 			return
 		}
-		done <- result{line: strings.TrimSpace(strings.TrimRight(line, "\r\n"))}
+		done <- result{line: trimECMAScriptWhitespace(strings.TrimRight(line, "\r\n"))}
 	}()
 	select {
 	case out := <-done:
@@ -96,6 +96,26 @@ func readSecretLine(input io.Reader, label string) (string, error) {
 	case <-time.After(secretLineTimeout):
 		return "", usageError("", "timed out waiting for %s on stdin", label)
 	}
+}
+
+// trimECMAScriptWhitespace trims exactly what JavaScript's String.prototype.trim
+// removes, which is NOT what Go's strings.TrimSpace removes.
+//
+// The two sets differ by exactly two characters, and BOTH directions corrupt a
+// real authorization code:
+//
+//	U+0085 NEL   JavaScript KEEPS it, Go's unicode.IsSpace TRIMS it, so a code
+//	             whose boundary byte is NEL was silently altered before being
+//	             submitted.
+//	U+FEFF BOM   JavaScript TRIMS it, Go KEEPS it. This is the likelier one in
+//	             practice: a code pasted from a Windows clipboard or a text
+//	             editor often carries a leading BOM, and forwarding it makes the
+//	             upstream reject a login that the TypeScript CLI completes.
+//
+// The predicate is shared with the argument parser rather than redefined here,
+// so the two cannot drift apart.
+func trimECMAScriptWhitespace(text string) string {
+	return strings.TrimFunc(text, isECMAScriptWhitespace)
 }
 
 // isTerminal reports whether the reader is an INTERACTIVE terminal, so the
