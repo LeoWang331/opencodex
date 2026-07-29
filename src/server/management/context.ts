@@ -1,4 +1,5 @@
 import type { OcxConfig } from "../../types";
+import type { providerDestinationResolvedError } from "../../lib/destination-policy";
 import type { StartupInstallAction } from "../startup-action-control";
 
 export interface ManagementApiDeps {
@@ -8,6 +9,7 @@ export interface ManagementApiDeps {
   clearProviderQuotaCache?: () => void;
   primeCodexPoolQuotas?: (config: OcxConfig, reason: string) => Promise<void> | void;
   runStartupInstallAction?: (action: StartupInstallAction) => Promise<{ message: string }>;
+  providerDestinationResolvedError?: typeof providerDestinationResolvedError;
 }
 
 

@@ -36,7 +36,7 @@ import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { clearThreadAccountMap } from "../../codex/routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
 import { redactSecretString } from "../../lib/redact";
-import { routeModel } from "../../router";
+import { routeModel, type RouteResult } from "../../router";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
 import { resolveCodexHomeDir } from "../../codex/home";
 import { readUsageEntries } from "../../usage/log";
@@ -64,6 +64,8 @@ import { applySystemEnvToggle } from "../system-env";
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
 import type { ManagementContext } from "./context";
+
+export const MODEL_PROBE_TIMEOUT_MS = 15_000;
 
 function modelProbeFailureStatus(status: number): number {
   if (status === 408 || status === 504) return 504;
@@ -140,6 +142,21 @@ function managementModelTestable(config: OcxConfig, model: string): boolean {
   }
 }
 
+function managementModelProbeRoutes(config: OcxConfig, model: string): RouteResult[] {
+  if (!preservesPhysicalComboProvider(config)) {
+    const comboId = resolveComboId(config, model);
+    if (comboId) {
+      const combo = config.combos?.[comboId];
+      if (!combo) return [];
+      return combo.targets.map(target => routeModel(
+        config,
+        `${target.provider}/${target.model}`,
+      ));
+    }
+  }
+  return [routeModel(config, model)];
+}
+
 export async function handleModelRoutes(ctx: ManagementContext): Promise<Response | null> {
   const { req, url, config, deps, refreshCodexCatalogBestEffort, syncClaudeAgentDefsBestEffort } = ctx;
 
@@ -158,7 +175,35 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       }, 409);
     }
 
-    const deadline = signalWithTimeout(15_000, req.signal);
+    const resolveDestination = deps.providerDestinationResolvedError
+      ?? providerDestinationResolvedError;
+    let probeRoutes: RouteResult[];
+    try {
+      probeRoutes = managementModelProbeRoutes(config, model);
+    } catch {
+      return jsonResponse({
+        ok: false,
+        error: "The selected model route is unavailable and cannot be tested from the management API.",
+      }, 409);
+    }
+    for (const route of probeRoutes) {
+      const destinationError = await resolveDestination(
+        route.providerName,
+        route.provider,
+        {
+          allowBenchmarkAddresses: route.providerName === "openai"
+            && isCanonicalOpenAiForwardProvider(route.provider),
+        },
+      );
+      if (destinationError) {
+        return jsonResponse({
+          ok: false,
+          error: `provider ${route.providerName} ${destinationError}`,
+        }, 400);
+      }
+    }
+
+    const deadline = signalWithTimeout(MODEL_PROBE_TIMEOUT_MS, req.signal);
     const stop = new AbortController();
     const probeSignal = AbortSignal.any([deadline.signal, stop.signal]);
     const probeRequest = new Request("http://localhost/v1/responses", {

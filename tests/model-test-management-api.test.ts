@@ -5,7 +5,14 @@ import { join } from "node:path";
 import { saveCodexAccountCredential } from "../src/codex/account-store";
 import { clearCodexUpstreamHealth } from "../src/codex/routing";
 import { handleManagementAPI } from "../src/server/management-api";
+import { MODEL_PROBE_TIMEOUT_MS } from "../src/server/management/model-routes";
 import type { OcxConfig, OcxProviderConfig } from "../src/types";
+
+function providerFetchStub(handler: () => Response | Promise<Response>): typeof fetch {
+  return Object.assign(async () => handler(), {
+    preconnect: () => undefined,
+  });
+}
 
 function directOpenAiConfig(): OcxConfig {
   return {
@@ -122,6 +129,98 @@ test("management model catalog only marks a combo testable when every selectable
   expect(combo("mixed")).toMatchObject({ managementTestable: false });
   expect(combo("safe")).toMatchObject({ managementTestable: true });
   expect(combo("unresolved")?.managementTestable).not.toBe(true);
+});
+
+test("management model probe blocks a resolved unsafe physical route before upstream dispatch", async () => {
+  let upstreamCalls = 0;
+  const config = {
+    port: 0,
+    hostname: "127.0.0.1",
+    defaultProvider: "mock",
+    providers: {
+      mock: {
+        adapter: "openai-chat",
+        baseUrl: "https://rebind.example.test/v1",
+        apiKey: "provider-secret",
+        liveModels: false,
+        models: ["model-one"],
+        fetch: providerFetchStub(async () => {
+          upstreamCalls += 1;
+          return Response.json({ error: "must not be reached" }, { status: 500 });
+        }),
+      },
+    },
+  } as OcxConfig;
+  const checked: string[] = [];
+  const url = new URL("http://127.0.0.1/api/models/test");
+
+  const response = await handleManagementAPI(new Request(url, {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ model: "mock/model-one" }),
+  }), url, config, {
+    providerDestinationResolvedError: async name => {
+      checked.push(name);
+      return "baseUrl resolves to a private network address";
+    },
+  });
+
+  expect(response?.status).toBe(400);
+  expect(await response!.json()).toEqual({
+    ok: false,
+    error: "provider mock baseUrl resolves to a private network address",
+  });
+  expect(checked).toEqual(["mock"]);
+  expect(upstreamCalls).toBe(0);
+});
+
+test("management model probe validates every selectable combo destination before dispatch", async () => {
+  let upstreamCalls = 0;
+  const provider = (baseUrl: string): OcxProviderConfig & { fetch: typeof fetch } => ({
+    adapter: "openai-chat",
+    baseUrl,
+    apiKey: "provider-secret",
+    liveModels: false,
+    models: ["model-one"],
+    fetch: providerFetchStub(async () => {
+      upstreamCalls += 1;
+      return Response.json({ error: "must not be reached" }, { status: 500 });
+    }),
+  });
+  const config = {
+    port: 0,
+    hostname: "127.0.0.1",
+    defaultProvider: "safe",
+    providers: {
+      safe: provider("https://safe.example.test/v1"),
+      blocked: provider("https://rebind.example.test/v1"),
+    },
+    combos: {
+      guarded: {
+        targets: [
+          { provider: "safe", model: "model-one" },
+          { provider: "blocked", model: "model-one" },
+        ],
+      },
+    },
+  } as OcxConfig;
+  const checked: string[] = [];
+  const url = new URL("http://127.0.0.1/api/models/test");
+
+  const response = await handleManagementAPI(new Request(url, {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ model: "combo/guarded" }),
+  }), url, config, {
+    providerDestinationResolvedError: async name => {
+      checked.push(name);
+      return name === "blocked" ? "baseUrl resolves to a private network address" : null;
+    },
+  });
+
+  expect(response?.status).toBe(400);
+  expect(checked).toEqual(["safe", "blocked"]);
+  expect(upstreamCalls).toBe(0);
 });
 
 test("management model catalog fails closed for missing or disabled providers across model types", async () => {
@@ -626,7 +725,7 @@ test("management model probe maps transport timeouts to 504", async () => {
   Object.defineProperty(globalThis, "setTimeout", {
     configurable: true,
     value: ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => (
-      originalSetTimeout(handler, timeout === 15_000 ? 0 : timeout, ...args)
+      originalSetTimeout(handler, timeout === MODEL_PROBE_TIMEOUT_MS ? 0 : timeout, ...args)
     )) as typeof setTimeout,
   });
   const provider = {
