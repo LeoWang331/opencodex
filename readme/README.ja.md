@@ -406,11 +406,12 @@ export OPENCODEX_ADMIN_AUTH_TOKEN="your-management-token"
 ocx start
 ```
 
-非ループバックバインドで環境トークンと `config.apiKeys` の両方がなければ起動を拒否します。バックグラウンド
+非ループバックバインドで `OPENCODEX_API_AUTH_TOKEN`（直接設定、または保護された
+`service-api-token` ファイル経由）と `config.apiKeys` の両方がなければ起動を拒否します。バックグラウンド
 サービスをインストールする前に、必要な明示トークンを同じシェルで export してください。インストーラーは保護された
 配布ファイルを介して保存します。クライアント（スクリプト、リモートマシン）はリクエスト対象面の認証情報を送ります。
 
-```
+```http
 x-opencodex-api-key: the-token-for-this-request-plane
 ```
 

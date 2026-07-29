@@ -95,8 +95,10 @@ verification; certificate verification cannot be disabled by provider config.
 
 When the protocol-matching `HTTP_PROXY` or `HTTPS_PROXY` applies, these two operations keep Bun's native
 fetch so existing proxy behavior is not silently bypassed. Lowercase `http_proxy`, `https_proxy`, and
-`no_proxy` take precedence over their uppercase forms when both are present, including when the lowercase
-value is empty. The bundled Bun 1.3.14 does not use `ALL_PROXY`; if it is the only effective proxy
+`no_proxy` take precedence over their uppercase forms when they are non-empty. Empty lowercase values are
+not a portable way to suppress uppercase values: opencodex falls back to a non-empty uppercase value,
+matching Bun on POSIX, while raw Bun on Windows may instead connect directly. Unset both case variants
+when disabling an inherited proxy. The bundled Bun 1.3.14 does not use `ALL_PROXY`; if it is the only effective proxy
 declaration for the provider URL protocol, connection tests and model discovery fail closed and tell
 you to set the corresponding protocol variable. URL/literal checks still run. Successful local DNS answers
 are classified, but a local DNS failure is allowed through because proxy-only networks commonly
@@ -268,7 +270,7 @@ Export explicit tokens before `ocx service install`. The installer writes their 
 WinSW definitions store only the corresponding file paths, never raw token values. Clients include
 the credential for the requested plane in `x-opencodex-api-key`:
 
-```
+```http
 x-opencodex-api-key: the-token-for-this-request-plane
 ```
 

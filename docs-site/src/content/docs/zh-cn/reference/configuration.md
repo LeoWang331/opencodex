@@ -124,7 +124,9 @@ opencodex 只解析一次 provider 主机名，并只连接到该次验证通过
 
 当与 URL 协议对应的 `HTTP_PROXY` 或 `HTTPS_PROXY` 生效时，这两个操作会保留 Bun 原生 `fetch`，
 避免静默绕过既有代理。小写的 `http_proxy`、`https_proxy` 和 `no_proxy` 优先于对应的大写变量，
-即使小写值为空也是如此。内置 Bun 1.3.14 不使用 `ALL_PROXY`；如果它是该 URL 协议唯一有效的代理声明，
+但仅限非空值。空的小写变量不能可靠地禁用大写变量：opencodex 会回退到非空的大写值，这与 POSIX 上的
+Bun 一致，而 Windows 上直接使用 Bun 时可能改为直连。要禁用继承的代理，应同时清除大小写两种变量。
+内置 Bun 1.3.14 不使用 `ALL_PROXY`；如果它是该 URL 协议唯一有效的代理声明，
 连接测试和模型发现会安全拒绝请求，并提示设置对应的协议变量。URL 和字面地址检查仍会执行；
 本机 DNS 成功解析出的地址会被分类，但本机 DNS
 解析失败时允许继续，因为仅代理网络通常把域名解析交给代理。最终路由、DNS 答案和对端均由代理选择，
@@ -173,7 +175,7 @@ ocx start
 WinSW 的服务定义只保存对应文件路径，绝不保存 token 明文。客户端在
 `x-opencodex-api-key` header 中提供当前请求平面的凭据：
 
-```
+```http
 x-opencodex-api-key: the-token-for-this-request-plane
 ```
 

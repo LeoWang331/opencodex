@@ -131,7 +131,10 @@ cooldown, health에 따라 자동 라우팅됩니다.
 
 URL 프로토콜에 맞는 `HTTP_PROXY` 또는 `HTTPS_PROXY`가 적용되면 이 두 작업은 기존 프록시를 조용히
 우회하지 않도록 Bun 네이티브 `fetch`를 유지합니다. 소문자 `http_proxy`, `https_proxy`, `no_proxy`는
-값이 비어 있는 경우를 포함해 대응하는 대문자 변수보다 우선합니다. 번들 Bun 1.3.14는 `ALL_PROXY`를
+값이 비어 있지 않을 때 대응하는 대문자 변수보다 우선합니다. 빈 소문자 값으로 대문자 값을 끄는 방식은
+이식 가능하지 않습니다. opencodex는 비어 있지 않은 대문자 값으로 폴백하며 이는 POSIX의 Bun과 같지만,
+Windows에서 Bun을 직접 사용하면 대신 직결될 수 있습니다. 상속된 프록시를 끄려면 대소문자 변수를 모두
+제거하세요. 번들 Bun 1.3.14는 `ALL_PROXY`를
 사용하지 않습니다. 이 변수가 URL 프로토콜에 대한 유일한 유효 프록시 선언이면 연결 테스트와 모델 검색은
 안전하게 요청을 거부하고 대응하는 프로토콜 변수를 설정하라는 안내를 표시합니다.
 URL과 리터럴 주소 검사는 계속 실행하며 로컬 DNS가
@@ -186,7 +189,7 @@ ocx start
 Task Scheduler, WinSW 서비스 정의에는 해당 파일 경로만 저장되고 token 원문은 저장되지 않습니다.
 클라이언트는 요청 대상 면의 자격 증명을 `x-opencodex-api-key` 헤더에 넣습니다.
 
-```
+```http
 x-opencodex-api-key: the-token-for-this-request-plane
 ```
 

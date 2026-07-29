@@ -420,11 +420,12 @@ export OPENCODEX_ADMIN_AUTH_TOKEN="your-management-token"
 ocx start
 ```
 
-비루프백 바인드에서 환경 토큰과 `config.apiKeys`가 모두 없으면 프록시 시작이 거부됩니다.
+비루프백 바인드에서 `OPENCODEX_API_AUTH_TOKEN`(직접 설정하거나 보호된 `service-api-token` 파일로
+전달)과 `config.apiKeys`가 모두 없으면 프록시 시작이 거부됩니다.
 백그라운드 서비스를 설치하기 전에 필요한 명시적 토큰을 같은 셸에서 export하세요. 설치 프로그램은
 보호된 전달 파일로 저장합니다. 클라이언트(스크립트, 원격 머신)는 요청 대상 면의 자격 증명을 보냅니다.
 
-```
+```http
 x-opencodex-api-key: the-token-for-this-request-plane
 ```
 

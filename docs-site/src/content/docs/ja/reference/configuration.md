@@ -124,7 +124,10 @@ pool アカウントの追加と quota 更新はダッシュボードの **Codex
 
 URL のプロトコルに対応する `HTTP_PROXY` または `HTTPS_PROXY` が適用される場合、この二つの操作は
 既存のプロキシを暗黙に迂回しないよう Bun ネイティブの `fetch` を維持します。小文字の `http_proxy`、
-`https_proxy`、`no_proxy` は、空文字列の場合も含め、対応する大文字の変数より優先されます。同梱の
+`https_proxy`、`no_proxy` は、空でない場合に対応する大文字の変数より優先されます。空の小文字変数で
+大文字変数を無効化する方法は移植性がありません。opencodex は空でない大文字値へフォールバックし、
+これは POSIX の Bun と同じですが、Windows で Bun を直接使う場合は直結になることがあります。
+継承したプロキシを無効にするには大小両方の変数を削除してください。同梱の
 Bun 1.3.14 は `ALL_PROXY` を使用しません。これが URL のプロトコルに対する唯一の有効なプロキシ宣言なら、
 接続テストとモデル検出は安全側に拒否し、対応するプロトコル変数を設定するよう案内します。
 URL とリテラルアドレスの検査は引き続き行い、
@@ -162,7 +165,8 @@ export OPENCODEX_ADMIN_AUTH_TOKEN="your-management-token"
 ocx start
 ```
 
-非 loopback バインドではデータプレーン環境 token と `config.apiKeys` の両方がないとプロキシは起動しません。
+非 loopback バインドでは `OPENCODEX_API_AUTH_TOKEN`（直接設定、または保護された
+`service-api-token` ファイル経由）と `config.apiKeys` の両方がないとプロキシは起動しません。
 管理面は独立しており、
 `OPENCODEX_ADMIN_AUTH_TOKEN` または別途生成され権限が保護された `admin-api-token` ファイルだけが
 `/api/*` を認証します。サービスをインストールすると、明示した管理 token は保護された
@@ -179,7 +183,7 @@ ocx start
 Task Scheduler、WinSW のサービス定義には対応するファイルパスだけが保存され、token の平文は保存されません。
 クライアントは対象面の認証情報を `x-opencodex-api-key` ヘッダーに入れます。
 
-```
+```http
 x-opencodex-api-key: the-token-for-this-request-plane
 ```
 

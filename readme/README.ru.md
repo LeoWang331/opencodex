@@ -447,12 +447,13 @@ export OPENCODEX_ADMIN_AUTH_TOKEN="your-management-token"
 ocx start
 ```
 
-Если при не-loopback-привязке нет ни переменной окружения, ни `config.apiKeys`, прокси не запустится.
+Если при не-loopback-привязке нет ни `OPENCODEX_API_AUTH_TOKEN` (заданного напрямую или через
+защищённый файл `service-api-token`), ни `config.apiKeys`, прокси не запустится.
 Перед установкой фоновой службы экспортируйте нужные явные токены в том же shell; установщик
 сохранит их через защищённые файлы доставки. Клиенты (скрипты, удалённые машины) передают учётные
 данные для соответствующей плоскости:
 
-```
+```http
 x-opencodex-api-key: the-token-for-this-request-plane
 ```
 
