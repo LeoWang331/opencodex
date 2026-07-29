@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { posix, win32 } from "node:path";
 
 const CMD_META = /([()%!^"`<>&|;, *?])/g;
@@ -77,13 +77,21 @@ function sanitizedNpmChildEnv(platform, env, cwd) {
 }
 
 function resolvePosixNpmCommand(env, deps) {
-  const exists = deps.exists ?? existsSync;
+  const isExecutable = deps.isExecutable ?? (candidate => {
+    try {
+      if (!statSync(candidate).isFile()) return false;
+      accessSync(candidate, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
   const cwd = deps.cwd ?? process.cwd();
   const pathEntries = safePosixPathEntries(env, cwd);
 
   for (const entry of pathEntries) {
     const candidate = posix.join(entry, "npm");
-    if (exists(candidate)) return posix.resolve(candidate);
+    if (isExecutable(candidate)) return posix.resolve(candidate);
   }
   return null;
 }

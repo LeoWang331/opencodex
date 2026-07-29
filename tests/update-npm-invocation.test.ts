@@ -153,12 +153,12 @@ describe("POSIX npm update invocation", () => {
 
     expect(resolveNpmCommand("linux", env, {
       cwd: project,
-      exists: path => existing.has(path),
+      isExecutable: path => existing.has(path),
     })).toBe(trustedNpm);
 
     expect(npmInvocation(["view", "pkg@latest", "version"], "linux", env, {
       cwd: project,
-      exists: path => existing.has(path),
+      isExecutable: path => existing.has(path),
     })).toEqual({
       file: trustedNpm,
       args: ["view", "pkg@latest", "version"],
@@ -171,6 +171,24 @@ describe("POSIX npm update invocation", () => {
     });
   });
 
+  test("continues past an unusable npm candidate to a later executable", () => {
+    const project = "/work/untrusted-project";
+    const blockedNpm = "/opt/blocked/npm";
+    const trustedNpm = "/usr/local/bin/npm";
+    const checked: string[] = [];
+
+    expect(resolveNpmCommand("linux", {
+      PATH: "/opt/blocked:/usr/local/bin",
+    }, {
+      cwd: project,
+      isExecutable: path => {
+        checked.push(path);
+        return path === trustedNpm;
+      },
+    })).toBe(trustedNpm);
+    expect(checked).toEqual([blockedNpm, trustedNpm]);
+  });
+
   test("fails closed when PATH contains only relative or current-directory entries", () => {
     const project = "/work/untrusted-project";
     const env = {
@@ -178,7 +196,7 @@ describe("POSIX npm update invocation", () => {
     };
     const deps = {
       cwd: project,
-      exists: () => true,
+      isExecutable: () => true,
     };
 
     expect(resolveNpmCommand("darwin", env, deps)).toBeNull();

@@ -1,6 +1,7 @@
 export interface NpmInvocationDeps {
   cwd?: string;
   exists?: (path: string) => boolean;
+  isExecutable?: (path: string) => boolean;
 }
 
 export interface NpmInvocation {
