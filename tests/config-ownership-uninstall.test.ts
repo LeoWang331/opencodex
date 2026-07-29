@@ -16,12 +16,23 @@ import { join } from "node:path";
 import {
   CONFIG_OWNER_FILE,
   CONFIG_UNINSTALL_MANIFEST,
+  isOwnershipInfrastructureName,
   recordOwnedConfigPath,
   removeOwnedConfigState,
 } from "../src/lib/config-ownership";
 import { getDefaultConfig, saveConfig } from "../src/config";
 
 describe("owned config uninstall", () => {
+  test("uses one rule for every ownership infrastructure filename", () => {
+    expect(isOwnershipInfrastructureName(".opencodex-owner.lock")).toBe(true);
+    expect(isOwnershipInfrastructureName(".opencodex-owner-recovery.lock")).toBe(true);
+    expect(isOwnershipInfrastructureName(".opencodex-owner-recovery.lock.claim-successor")).toBe(true);
+    expect(isOwnershipInfrastructureName(
+      ".opencodex-owner-lock-publish-99999999-00000000-0000-4000-8000-000000000012.tmp",
+    )).toBe(true);
+    expect(isOwnershipInfrastructureName("config.json")).toBe(false);
+  });
+
   test("first owned write creates a missing config root and its metadata", () => {
     const parent = mkdtempSync(join(tmpdir(), "ocx-config-first-owned-path-"));
     const dir = join(parent, "config");
@@ -248,7 +259,7 @@ describe("owned config uninstall", () => {
       utimesSync(mainLockPath, old, old);
       utimesSync(recoveryClaimPath, old, old);
 
-      expect(recordOwnedConfigPath(dir, nextPath)).toBe(false);
+      expect(recordOwnedConfigPath(dir, nextPath, { lockTimeoutMs: 25 })).toBe(false);
       expect(readFileSync(mainLockPath, "utf8")).toBe(mainToken);
       expect(readFileSync(recoveryClaimPath, "utf8")).toBe(claimToken);
       const manifest = JSON.parse(
@@ -277,7 +288,7 @@ describe("owned config uninstall", () => {
       utimesSync(mainLockPath, old, old);
       utimesSync(recoveryLockPath, old, old);
 
-      expect(recordOwnedConfigPath(dir, nextPath)).toBe(false);
+      expect(recordOwnedConfigPath(dir, nextPath, { lockTimeoutMs: 25 })).toBe(false);
       expect(readFileSync(mainLockPath, "utf8")).toBe(mainToken);
       expect(readFileSync(recoveryLockPath, "utf8")).toBe(recoveryToken);
     } finally {
@@ -298,7 +309,7 @@ describe("owned config uninstall", () => {
       const old = new Date(Date.now() - 60_000);
       utimesSync(lockPath, old, old);
 
-      expect(recordOwnedConfigPath(dir, nextPath)).toBe(false);
+      expect(recordOwnedConfigPath(dir, nextPath, { lockTimeoutMs: 25 })).toBe(false);
       expect(readFileSync(lockPath, "utf8")).toBe(lockToken);
       const manifest = JSON.parse(
         readFileSync(join(dir, CONFIG_UNINSTALL_MANIFEST), "utf8"),
@@ -321,7 +332,7 @@ describe("owned config uninstall", () => {
       const lockToken = `${process.pid}:00000000-0000-4000-8000-000000000000\n`;
       writeFileSync(lockPath, lockToken, { flag: "wx" });
 
-      const result = removeOwnedConfigState(dir);
+      const result = removeOwnedConfigState(dir, { lockTimeoutMs: 25 });
       expect(result.status).toBe("refused");
       expect(readFileSync(ownedPath, "utf8")).toBe('{"owned":true}\n');
       expect(existsSync(join(dir, CONFIG_OWNER_FILE))).toBe(true);
@@ -584,6 +595,7 @@ describe("owned config uninstall", () => {
     const dir = join(parent, "config");
     const ownedPath = join(dir, "config.json");
     const lockPath = join(dir, ".opencodex-owner.lock");
+    const injectionMarker = join(parent, "final-revalidation-injected");
     const ownershipModule = new URL("../src/lib/config-ownership.ts", import.meta.url).href;
     mkdirSync(dir);
 
@@ -599,6 +611,7 @@ describe("owned config uninstall", () => {
            if (path === process.env.OCX_TEST_LOCK_PATH) {
              fixedNameChecks += 1;
              if (fixedNameChecks === 2) {
+               actualFs.writeFileSync(process.env.OCX_TEST_INJECTION_MARKER, "injected\\n");
                const token = actualFs.readFileSync(path, "utf8");
                const changed = token.slice(0, -2) + (token.at(-2) === "a" ? "b" : "a") + "\\n";
                actualFs.writeFileSync(path, changed);
@@ -618,6 +631,7 @@ describe("owned config uninstall", () => {
         OCX_TEST_CONFIG_DIR: dir,
         OCX_TEST_OWNED_PATH: ownedPath,
         OCX_TEST_LOCK_PATH: lockPath,
+        OCX_TEST_INJECTION_MARKER: injectionMarker,
       },
       stdio: ["ignore", "ignore", "pipe"],
     });
@@ -631,6 +645,7 @@ describe("owned config uninstall", () => {
         child.once("exit", resolveChild);
       });
       expect(exitCode, stderr).toBe(0);
+      expect(existsSync(injectionMarker)).toBe(true);
       expect(existsSync(join(dir, CONFIG_OWNER_FILE))).toBe(false);
     } finally {
       child.kill();
@@ -782,7 +797,7 @@ describe("owned config uninstall", () => {
 
       const result = removeOwnedConfigState(dir);
       expect(result.status).toBe("partial");
-      expect(result.residualPaths).toContain(tempPath);
+      expect(result.residualPaths).toContain(dir);
       expect(readFileSync(tempPath, "utf8")).toBe("incomplete pre-publication state");
     } finally {
       rmSync(parent, { recursive: true, force: true });
@@ -800,7 +815,7 @@ describe("owned config uninstall", () => {
     utimesSync(lockPath, old, old);
 
     try {
-      expect(recordOwnedConfigPath(dir, ownedPath)).toBe(false);
+      expect(recordOwnedConfigPath(dir, ownedPath, { lockTimeoutMs: 25 })).toBe(false);
       expect(existsSync(join(dir, CONFIG_OWNER_FILE))).toBe(false);
       expect(existsSync(join(dir, CONFIG_UNINSTALL_MANIFEST))).toBe(false);
       expect(existsSync(lockPath)).toBe(true);
@@ -938,12 +953,118 @@ describe("owned config uninstall", () => {
       const old = new Date(Date.now() - 60_000);
       utimesSync(recoveryLockPath, old, old);
 
-      const result = removeOwnedConfigState(dir);
+      const result = removeOwnedConfigState(dir, { lockTimeoutMs: 25 });
       expect(result.status).toBe("refused");
       expect(readFileSync(ownedPath, "utf8")).toBe('{"owned":true}\n');
       expect(existsSync(join(dir, CONFIG_OWNER_FILE))).toBe(true);
       expect(existsSync(join(dir, CONFIG_UNINSTALL_MANIFEST))).toBe(true);
       expect(readFileSync(recoveryLockPath, "utf8")).toBe(recoveryToken);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves a live recovery claim that replaces a verified stale claim", () => {
+    const parent = mkdtempSync(join(tmpdir(), "ocx-config-recovery-claim-swap-"));
+    const dir = join(parent, "config");
+    const ownedPath = join(dir, "config.json");
+    const claimPath = join(
+      dir,
+      ".opencodex-owner-recovery.lock.claim-race",
+    );
+    const ownershipModule = new URL("../src/lib/config-ownership.ts", import.meta.url).href;
+    const staleToken = "99999999:00000000-0000-4000-8000-000000000013\n";
+    const successorToken = `${process.pid}:00000000-0000-4000-8000-000000000014\n`;
+
+    try {
+      expect(recordOwnedConfigPath(dir, ownedPath)).toBe(true);
+      writeFileSync(ownedPath, '{"owned":true}\n');
+      writeFileSync(claimPath, staleToken);
+      const old = new Date(Date.now() - 60_000);
+      utimesSync(claimPath, old, old);
+
+      const child = spawnSync(process.execPath, [
+        "-e",
+        `import { mock } from "bun:test";
+         const actualFs = await import("node:fs");
+         const actualReadFileSync = actualFs.readFileSync;
+         let claimReads = 0;
+         mock.module("node:fs", () => ({
+           ...actualFs,
+           readFileSync(path, options) {
+             const contents = actualReadFileSync(path, options);
+             if (path === process.env.OCX_TEST_CLAIM_PATH) {
+               claimReads += 1;
+               if (claimReads === 2) {
+                 actualFs.unlinkSync(path);
+                 actualFs.writeFileSync(path, process.env.OCX_TEST_SUCCESSOR_TOKEN);
+               }
+             }
+             return contents;
+           },
+         }));
+         const { removeOwnedConfigState } = await import(${JSON.stringify(ownershipModule)});
+         const result = removeOwnedConfigState(process.env.OCX_TEST_CONFIG_DIR);
+         if (result.status !== "refused") process.exit(42);`,
+      ], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          OCX_TEST_CONFIG_DIR: dir,
+          OCX_TEST_CLAIM_PATH: claimPath,
+          OCX_TEST_SUCCESSOR_TOKEN: successorToken,
+        },
+      });
+
+      expect(child.status, child.stderr || child.stdout).toBe(0);
+      expect(readFileSync(claimPath, "utf8")).toBe(successorToken);
+      expect(readFileSync(ownedPath, "utf8")).toBe('{"owned":true}\n');
+      expect(existsSync(join(dir, CONFIG_OWNER_FILE))).toBe(true);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  test("refreshes the ownership lease during a manifest removal walk", () => {
+    const parent = mkdtempSync(join(tmpdir(), "ocx-config-lock-heartbeat-"));
+    const dir = join(parent, "config");
+    const ownedDir = join(dir, "artifacts");
+    const markerPath = join(parent, "lease-refreshed");
+    const ownershipModule = new URL("../src/lib/config-ownership.ts", import.meta.url).href;
+
+    try {
+      const child = spawnSync(process.execPath, [
+        "-e",
+        `import { mock } from "bun:test";
+         const actualFs = await import("node:fs");
+         const actualFutimesSync = actualFs.futimesSync;
+         mock.module("node:fs", () => ({
+           ...actualFs,
+           futimesSync(descriptor, atime, mtime) {
+             actualFs.writeFileSync(process.env.OCX_TEST_HEARTBEAT_MARKER, "refreshed\\n");
+             return actualFutimesSync(descriptor, atime, mtime);
+           },
+         }));
+         const { recordOwnedConfigPath, removeOwnedConfigState } = await import(${JSON.stringify(ownershipModule)});
+         if (!recordOwnedConfigPath(process.env.OCX_TEST_CONFIG_DIR, process.env.OCX_TEST_OWNED_DIR)) process.exit(41);
+         actualFs.mkdirSync(process.env.OCX_TEST_OWNED_DIR, { recursive: true });
+         actualFs.writeFileSync(process.env.OCX_TEST_OWNED_FILE, "owned\\n");
+         const result = removeOwnedConfigState(process.env.OCX_TEST_CONFIG_DIR, { leaseRefreshMs: 0 });
+         if (result.status !== "removed") process.exit(42);`,
+      ], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          OCX_TEST_CONFIG_DIR: dir,
+          OCX_TEST_OWNED_DIR: ownedDir,
+          OCX_TEST_OWNED_FILE: join(ownedDir, "entry.txt"),
+          OCX_TEST_HEARTBEAT_MARKER: markerPath,
+        },
+      });
+
+      expect(child.status, child.stderr || child.stdout).toBe(0);
+      expect(existsSync(markerPath)).toBe(true);
+      expect(existsSync(dir)).toBe(false);
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
@@ -995,21 +1116,21 @@ describe("owned config uninstall", () => {
     }
   });
 
-  test("does not claim a legacy directory containing an abandoned recovery lock", () => {
+  test("treats a recovery lock as ownership infrastructure rather than legacy content", () => {
     const dir = mkdtempSync(join(tmpdir(), "ocx-config-legacy-recovery-lock-"));
     const recoveryLock = join(dir, ".opencodex-owner-recovery.lock");
     writeFileSync(recoveryLock, "legacy content\n");
 
     try {
-      expect(recordOwnedConfigPath(dir, join(dir, "config.json"))).toBe(false);
-      expect(existsSync(join(dir, CONFIG_OWNER_FILE))).toBe(false);
+      expect(recordOwnedConfigPath(dir, join(dir, "config.json"))).toBe(true);
+      expect(existsSync(join(dir, CONFIG_OWNER_FILE))).toBe(true);
       expect(readFileSync(recoveryLock, "utf8")).toBe("legacy content\n");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("does not claim a legacy directory after recovering its abandoned locks", () => {
+  test("claims an infrastructure-only directory after recovering abandoned locks", () => {
     const dir = mkdtempSync(join(tmpdir(), "ocx-config-legacy-stale-locks-"));
     const mainLockPath = join(dir, ".opencodex-owner.lock");
     const recoveryLockPath = join(dir, ".opencodex-owner-recovery.lock");
@@ -1020,9 +1141,9 @@ describe("owned config uninstall", () => {
     utimesSync(recoveryLockPath, old, old);
 
     try {
-      expect(recordOwnedConfigPath(dir, join(dir, "config.json"))).toBe(false);
-      expect(existsSync(join(dir, CONFIG_OWNER_FILE))).toBe(false);
-      expect(existsSync(join(dir, CONFIG_UNINSTALL_MANIFEST))).toBe(false);
+      expect(recordOwnedConfigPath(dir, join(dir, "config.json"))).toBe(true);
+      expect(existsSync(join(dir, CONFIG_OWNER_FILE))).toBe(true);
+      expect(existsSync(join(dir, CONFIG_UNINSTALL_MANIFEST))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
