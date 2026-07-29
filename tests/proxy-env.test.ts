@@ -70,12 +70,7 @@ describe("applyProxyEnv", () => {
       http_proxy: "",
       https_proxy: "",
     };
-    const applyWithEnv = applyProxyEnv as unknown as (
-      config: OcxConfig,
-      targetEnv: Record<string, string | undefined>,
-    ) => void;
-
-    applyWithEnv(configWithProxy("http://proxy.corp:8080"), env);
+    applyProxyEnv(configWithProxy("http://proxy.corp:8080"), env);
 
     expect(env.http_proxy).toBe("http://proxy.corp:8080");
     expect(env.https_proxy).toBe("http://proxy.corp:8080");

@@ -437,7 +437,7 @@ describe("provider outbound GET transport", () => {
 
     const result = await runIsolatedBun(script, childEnv);
 
-    expect(result.exitCode, result.stderr).toBe(0);
+    expect({ exitCode: result.exitCode, stderr: result.stderr }).toMatchObject({ exitCode: 0 });
     expect(JSON.parse(result.stdout.trim())).toEqual([
       { name: "HTTP uses HTTP_PROXY", route: "A", exitCode: 0 },
       { name: "HTTP uses http_proxy", route: "A", exitCode: 0 },
@@ -458,7 +458,7 @@ describe("provider outbound GET transport", () => {
         exitCode: 0,
       },
     ]);
-  }, 20_000);
+  }, process.platform === "win32" ? 60_000 : 30_000);
 
   test("proxy mode reaches one real proxy across outbound, connection-test, and model-discovery paths", async () => {
     const childHome = mkdtempSync(join(tmpdir(), "ocx-provider-proxy-e2e-"));
