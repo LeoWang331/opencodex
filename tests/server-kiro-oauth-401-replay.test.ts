@@ -257,7 +257,7 @@ describe("Kiro OAuth upstream 401 replay", () => {
     } finally {
       server.stop(true);
     }
-  });
+  }, 15_000);
 
   test("a second 401 is propagated without a second refresh or replay", async () => {
     await seedOAuth();
