@@ -30,7 +30,7 @@ differing backup and rewrites known legacy namespaced selected ids to bare ids.
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | Port the proxy listens on. |
-| `hostname?` | `string` | `"127.0.0.1"` | Bind address. Set `"0.0.0.0"` to expose on the LAN (requires `OPENCODEX_API_AUTH_TOKEN`; see [Remote access](#remote-access) below). |
+| `hostname?` | `string` | `"127.0.0.1"` | Bind address. Set `"0.0.0.0"` to expose on the LAN (requires data-plane credentials through `OPENCODEX_API_AUTH_TOKEN` or `config.apiKeys`; management authentication remains separate; see [Remote access](#remote-access) below). |
 | `proxy?` | `string` | — | Outbound HTTP(S) proxy URL or `${ENV_VAR}` reference. Applied to `HTTP_PROXY` / `HTTPS_PROXY` when those env vars are unset; loopback stays in `NO_PROXY`. |
 | `providers` | `Record<string, OcxProviderConfig>` | — | Map of provider name → config. |
 | `openaiProviderTierVersion?` | `2` | set by migration | Marks the single option-aware OpenAI projection as complete. |
@@ -52,7 +52,7 @@ differing backup and rewrites known legacy namespaced selected ids to bare ids.
 | `shutdownTimeoutMs?` | `number` | `5000` | Graceful drain deadline before active turns are aborted. |
 | `websockets?` | `boolean` | `false` | Advertise `supports_websockets` so Codex uses the Responses WebSocket path. Omit or set `false` to keep HTTP/SSE. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | unset / `enabled: false` | **Opt-in** archived auto-cleanup (issue #42 Phase 3). Default **OFF** — never enabled implicitly. When enabled, runs on `schedule` (`startup` / `daily` / `weekly` / `manual`) once archived bytes exceed `trigger.archivedBytesOver`, selecting oldest archives toward `target` (`reduceToBytes` or `removeOldestPercent`) in `mode` (`quarantine` default, or explicit `permanent`). Persists `lastRun` / `nextRun`. Configure via Storage page or `GET`/`PUT /api/storage/cleanup-policy`; `POST /api/storage/cleanup-policy/run` for manual. |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | Additional generated `ocx_…` credentials accepted by management and data-plane auth on non-loopback binds. Managed by the dashboard; entry fields are listed below. |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | Additional generated data-plane `ocx_…` credentials accepted only by `/v1/*` and the corresponding WebSocket handshakes. They never authorize `/api/*`. Managed by the dashboard; entry fields are listed below. |
 | `codexAutoStart?` | `boolean` | `true` | Let the Codex shim run `ocx ensure` before launching Codex. `false` makes `ocx ensure` a no-op. |
 | `codexShimAutoRestore?` | `boolean` | `true` | Restore a previously installed Codex shim when a completed external Codex update replaces it. Set `false`, or set `OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0` for a process-level opt-out. |
 | `syncResumeHistory?` | `boolean` | `true` | Reversible Codex App history compatibility mode. opencodex backs up original Codex thread metadata, remaps old OpenAI interactive rows to `opencodex`, and temporarily promotes opencodex-created `exec` rows to an app-visible source. `ocx stop` / `ocx restore` restore backed-up OpenAI rows and eject remaining opencodex user threads to OpenAI so native Codex can resume them after the proxy is removed from `config.toml`. Set `false` to opt out. |
@@ -70,7 +70,7 @@ differing backup and rewrites known legacy namespaced selected ids to bare ids.
 | `visionSidecar?` | `OcxVisionSidecarConfig` | on | Vision sidecar options (see below). |
 | `images?` | `OcxImagesConfig` | automatic OpenAI selection | Standalone Images relay options for Codex's built-in `image_gen` tool (see below). |
 | `tokenGuardian?` | `OcxTokenGuardianConfig` | off | Optional proactive OAuth refresh and Codex-account warmup policy; fields are listed below. |
-| `corsAllowOrigins?` | `string[]` | `[]` | Additional exact origins allowed by CORS. Loopback origins are always allowed. |
+| `corsAllowOrigins?` | `string[]` | `[]` | Additional exact origins allowed by data-plane CORS. Loopback origins are always allowed. This does not extend management CORS or GUI-session issuance. |
 
 `codexAccountNamespaces` keys are public selectors: 1–64 characters, starting and ending with an
 ASCII letter or number, with letters, numbers, `.`, `_`, or `-` inside; reserved JavaScript object
@@ -93,8 +93,12 @@ transport. Without an outbound proxy, opencodex resolves the provider hostname o
 only to that validated address. HTTPS keeps the original hostname for Host, SNI, and certificate
 verification; certificate verification cannot be disabled by provider config.
 
-When `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` applies, these two operations keep Bun's native fetch
-so existing proxy behavior is not silently bypassed. URL/literal checks still run. Successful local DNS answers
+When the protocol-matching `HTTP_PROXY` or `HTTPS_PROXY` applies, these two operations keep Bun's native
+fetch so existing proxy behavior is not silently bypassed. Lowercase `http_proxy`, `https_proxy`, and
+`no_proxy` take precedence over their uppercase forms when both are present, including when the lowercase
+value is empty. The bundled Bun 1.3.14 does not use `ALL_PROXY`; if it is the only effective proxy
+declaration for the provider URL protocol, connection tests and model discovery fail closed and tell
+you to set the corresponding protocol variable. URL/literal checks still run. Successful local DNS answers
 are classified, but a local DNS failure is allowed through because proxy-only networks commonly
 delegate name resolution to the proxy. The proxy chooses the final route, DNS answer, and peer, so
 opencodex logs that this path cannot pin or verify the proxy-selected peer. This is an explicit
@@ -233,32 +237,55 @@ normally dashboard-managed.
 ## Remote access
 
 By default opencodex binds to `127.0.0.1` (loopback only). When `hostname` is set to a non-loopback
-address such as `0.0.0.0`, opencodex enforces token authentication on **both** the management API
-(`/api/*`) and the data-plane (`/v1/responses`).
+address such as `0.0.0.0`, opencodex requires at least one data-plane credential for `/v1/*` and the
+corresponding WebSocket handshakes: `OPENCODEX_API_AUTH_TOKEN` (set directly or delivered through
+the protected `service-api-token` file), or at least one dashboard-generated `config.apiKeys` entry.
 
-Set the `OPENCODEX_API_AUTH_TOKEN` environment variable before starting:
+Configure either data-plane credential form before starting. The environment-token form is shown
+below. Set an explicit management token too when remote operators or automation need a stable credential:
 
 ```bash
-export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
+export OPENCODEX_API_AUTH_TOKEN="your-data-plane-token"
+export OPENCODEX_ADMIN_AUTH_TOKEN="your-management-token"
 ocx start
 ```
 
-The proxy refuses to start without this variable when binding beyond loopback. If you install a
-background service for LAN access, export the same variable before `ocx service install` so launchd,
-systemd, or Task Scheduler receives it. Clients must include the token in every request via the
-`x-opencodex-api-key` header:
+The proxy refuses a non-loopback bind when both the data-plane environment token and
+`config.apiKeys` are absent. Management access is independent: `OPENCODEX_ADMIN_AUTH_TOKEN`, or the
+separately generated and protected
+`admin-api-token` file, authorizes only `/api/*`. A service install persists an explicit management
+token through the protected `service-admin-token` delivery file; this remains a management
+credential, not a fourth credential type.
+
+:::caution[Credential migration]
+Earlier releases also admitted `OPENCODEX_API_AUTH_TOKEN` and `config.apiKeys` to `/api/*`. They are
+data-plane-only after this split. Update existing management scripts to use
+`OPENCODEX_ADMIN_AUTH_TOKEN` or the protected `admin-api-token`; data-plane clients are unchanged.
+:::
+
+Export explicit tokens before `ocx service install`. The installer writes their values to protected
+`service-api-token` and `service-admin-token` delivery files; launchd, systemd, Task Scheduler, and
+WinSW definitions store only the corresponding file paths, never raw token values. Clients include
+the credential for the requested plane in `x-opencodex-api-key`:
 
 ```
-x-opencodex-api-key: your-secret-token
+x-opencodex-api-key: the-token-for-this-request-plane
 ```
 
-An `Authorization: Bearer …` header is also accepted. Dashboard-generated `apiKeys` may be used in
-place of the environment token after startup; all candidates are compared in constant time
-(`timingSafeEqual`) to prevent timing side-channels.
+Use `x-opencodex-api-key` for compatibility across the data plane. `Authorization: Bearer …` is
+also accepted by management routes and data routes that permit bearer admission, but
+`/v1/responses`, `/v1/responses/compact`, `/v1/chat/completions`, and the Responses WebSocket
+handshake require `x-opencodex-api-key`. Data-plane and management credentials are not
+interchangeable. A legal same-origin loopback dashboard entry receives a short-lived, Origin-bound
+GUI session that authorizes only `/api/*`; remote operators and scripts must use the management
+token. If management credential creation, permission hardening, or reading fails, every `/api/*`
+request returns `503`, while `/v1/*` and the unauthenticated `/healthz` endpoint continue.
+Long-lived data-plane and management secrets, plus GUI CSRF tokens, use constant-time comparisons
+(`timingSafeEqual`); short-lived high-entropy GUI session ids use an in-memory lookup.
 
 :::caution[LAN exposure]
 Binding to `0.0.0.0` exposes your proxy — and all configured provider credentials — to the local
-network. Only do this on trusted networks, and always set a strong `OPENCODEX_API_AUTH_TOKEN`.
+network. Only do this on trusted networks, and use strong, distinct data-plane and management tokens.
 :::
 
 ### SSH port forwarding

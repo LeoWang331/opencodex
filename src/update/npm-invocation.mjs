@@ -1,7 +1,13 @@
 import { existsSync } from "node:fs";
-import { win32 } from "node:path";
+import { posix, win32 } from "node:path";
 
 const CMD_META = /([()%!^"`<>&|;, *?])/g;
+const NPM_CHILD_STRIPPED_ENV_KEYS = new Set([
+  "OPENCODEX_ADMIN_AUTH_TOKEN",
+  "OCX_ADMIN_TOKEN_FILE",
+  "OPENCODEX_API_AUTH_TOKEN",
+  "OCX_API_TOKEN_FILE",
+]);
 
 function escapeCmdArg(arg) {
   let out = String(arg).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, "$1$1");
@@ -35,25 +41,67 @@ function cleanPathEntry(entry) {
   return trimmed;
 }
 
+function safePosixPathEntries(env, cwd) {
+  const resolvedCwd = posix.resolve(cwd);
+  return (env.PATH ?? "")
+    .split(posix.delimiter)
+    .filter(entry => entry && posix.isAbsolute(entry) && posix.resolve(entry) !== resolvedCwd);
+}
+
+function safeWindowsPathEntries(env, cwd) {
+  return (env.PATH ?? env.Path ?? "")
+    .split(win32.delimiter)
+    .map(cleanPathEntry)
+    .filter(entry => entry && win32.isAbsolute(entry) && !isCurrentDirectory(cwd, entry));
+}
+
+function sanitizedNpmChildEnv(platform, env, cwd) {
+  const childEnv = { ...env };
+  for (const key of Object.keys(childEnv)) {
+    const admissionKey = platform === "win32" ? key.toUpperCase() : key;
+    if (NPM_CHILD_STRIPPED_ENV_KEYS.has(admissionKey)) delete childEnv[key];
+    if (key.toLowerCase() === "path") delete childEnv[key];
+    if (platform === "win32" && key.toLowerCase() === "nodefaultcurrentdirectoryinexepath") {
+      delete childEnv[key];
+    }
+  }
+  childEnv.PATH = (platform === "win32"
+    ? safeWindowsPathEntries(env, cwd)
+    : safePosixPathEntries(env, cwd)).join(platform === "win32" ? win32.delimiter : posix.delimiter);
+  if (platform === "win32") {
+    // npm.cmd shims can fall back to a bare `node` command. Prevent cmd.exe from
+    // searching the launch directory before the sanitized absolute PATH entries.
+    childEnv.NoDefaultCurrentDirectoryInExePath = "1";
+  }
+  return childEnv;
+}
+
+function resolvePosixNpmCommand(env, deps) {
+  const exists = deps.exists ?? existsSync;
+  const cwd = deps.cwd ?? process.cwd();
+  const pathEntries = safePosixPathEntries(env, cwd);
+
+  for (const entry of pathEntries) {
+    const candidate = posix.join(entry, "npm");
+    if (exists(candidate)) return posix.resolve(candidate);
+  }
+  return null;
+}
+
 export function resolveNpmCommand(
   platform = process.platform,
   env = process.env,
   deps = {},
 ) {
-  if (platform !== "win32") return "npm";
+  if (platform !== "win32") return resolvePosixNpmCommand(env, deps);
   const exists = deps.exists ?? existsSync;
   const cwd = deps.cwd ?? process.cwd();
   const extensions = (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
     .split(";")
     .filter(Boolean);
-  const pathEntries = (env.PATH ?? env.Path ?? "")
-    .split(win32.delimiter)
-    .map(cleanPathEntry)
-    .filter(Boolean);
+  const pathEntries = safeWindowsPathEntries(env, cwd);
 
   for (const entry of pathEntries) {
-    if (!win32.isAbsolute(entry)) continue;
-    if (isCurrentDirectory(cwd, entry)) continue;
     for (const extension of extensions) {
       const candidate = win32.join(entry, `npm${extension.toLowerCase()}`);
       if (exists(candidate)) return win32.resolve(candidate);
@@ -79,8 +127,9 @@ export function npmInvocation(
 ) {
   const npm = resolveNpmCommand(platform, env, deps);
   if (!npm) return null;
+  const childEnv = sanitizedNpmChildEnv(platform, env, deps.cwd ?? process.cwd());
   if (platform !== "win32" || !/\.(cmd|bat)$/i.test(npm)) {
-    return { file: npm, args: [...args], options: {} };
+    return { file: npm, args: [...args], options: { env: childEnv } };
   }
 
   const commandProcessor = systemCommandProcessor(env);
@@ -89,6 +138,6 @@ export function npmInvocation(
   return {
     file: commandProcessor,
     args: ["/d", "/s", "/c", `"${line}"`],
-    options: { windowsVerbatimArguments: true },
+    options: { windowsVerbatimArguments: true, env: childEnv },
   };
 }

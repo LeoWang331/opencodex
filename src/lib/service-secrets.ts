@@ -1,9 +1,10 @@
 import { join } from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 import { getConfigDir } from "../config";
+import { serviceAdminTokenFilePath } from "./admin-secrets";
 
-export function serviceApiTokenFilePath(): string {
-  return join(getConfigDir(), "service-api-token");
+export function serviceApiTokenFilePath(configDir = getConfigDir()): string {
+  return join(configDir, "service-api-token");
 }
 
 /**
@@ -22,4 +23,38 @@ export function loadServiceTokenFromFile(env: Record<string, string | undefined>
   } catch {
     return null;
   }
+}
+
+/**
+ * Load the service-delivered data-plane credential before the server starts. The management
+ * credential file is read directly by management-auth so it never enters process.env.
+ */
+export function loadServiceTokensIntoEnv(
+  env: Record<string, string | undefined>,
+  _configDir = getConfigDir(),
+): void {
+  const dataToken = loadServiceTokenFromFile(env);
+  if (dataToken) env.OPENCODEX_API_AUTH_TOKEN = dataToken;
+}
+
+export function removeServiceTokenFiles(
+  configDir = getConfigDir(),
+  remove: (path: string) => void = unlinkSync,
+): string[] {
+  const residual: string[] = [];
+  const files = [
+    ["service-api-token", serviceApiTokenFilePath(configDir)],
+    ["service-admin-token", serviceAdminTokenFilePath(configDir)],
+  ] as const;
+  for (const [name, path] of files) {
+    try {
+      remove(path);
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error
+        ? String((error as NodeJS.ErrnoException).code)
+        : "";
+      if (code !== "ENOENT") residual.push(name);
+    }
+  }
+  return residual;
 }

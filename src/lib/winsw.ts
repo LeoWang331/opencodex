@@ -22,6 +22,7 @@ import { expandUserPath, getConfigDir, loadConfig } from "../config";
 import { recordOwnedConfigPath } from "./config-ownership";
 import { durableBunPath } from "./bun-runtime";
 import { serviceApiTokenFilePath } from "./service-secrets";
+import { serviceAdminTokenFilePath } from "./admin-secrets";
 
 export const WINSW_VERSION = "2.12.0";
 export const WINSW_URL = `https://github.com/winsw/winsw/releases/download/v${WINSW_VERSION}/WinSW.NET461.exe`;
@@ -67,13 +68,22 @@ export interface WinswEntry {
   cli: string;
 }
 
+export interface WinswServiceTokenDefinitionState {
+  adminTokenFile: string | null;
+}
+
 /**
  * Build the WinSW v2 XML. Never embeds the API token value — the app loads it from
  * OCX_API_TOKEN_FILE at startup (cli handleStart). PATH is baked for parity with the
  * Task Scheduler wrapper / launchd / systemd: the SCM service environment lacks the
  * user's interactive PATH, which provider subprocesses may need.
  */
-export function buildWinswXml(entry: WinswEntry, env: NodeJS.ProcessEnv = process.env, port?: number): string {
+export function buildWinswXml(
+  entry: WinswEntry,
+  env: NodeJS.ProcessEnv = process.env,
+  port?: number,
+  state?: WinswServiceTokenDefinitionState,
+): string {
   const domain = env.USERDOMAIN?.trim() || ".";
   const user = env.USERNAME?.trim() || "";
   const listenPort = (() => {
@@ -87,9 +97,15 @@ export function buildWinswXml(entry: WinswEntry, env: NodeJS.ProcessEnv = proces
   })();
   // Services never bake `--port 0` (parsePortOption rejects it); treat as default.
   const safeListenPort = listenPort > 0 && listenPort <= 65535 ? listenPort : 10100;
+  const adminTokenFile = state
+    ? state.adminTokenFile
+    : (existsSync(serviceAdminTokenFilePath()) ? serviceAdminTokenFilePath() : null);
   const envLines = [
     `  <env name="OCX_SERVICE" value="1"/>`,
     `  <env name="OCX_API_TOKEN_FILE" value="${xmlEscape(serviceApiTokenFilePath())}"/>`,
+    adminTokenFile
+      ? `  <env name="OCX_ADMIN_TOKEN_FILE" value="${xmlEscape(adminTokenFile)}"/>`
+      : null,
     `  <env name="PATH" value="${xmlEscape(env.PATH ?? "")}"/>`,
     env.CODEX_HOME?.trim() ? `  <env name="CODEX_HOME" value="${xmlEscape(currentCodexHomeAbsolute())}"/>` : null,
     env.OPENCODEX_HOME?.trim() ? `  <env name="OPENCODEX_HOME" value="${xmlEscape(getConfigDir())}"/>` : null,
@@ -278,7 +294,11 @@ export interface WinswInstallDeps {
  * `install /p` — assets are rewritten and the service restarted without re-prompting
  * credentials (WinSW `install` fails with "service already exists").
  */
-export async function installWinswService(entry: WinswEntry, deps: WinswInstallDeps = {}): Promise<void> {
+export async function installWinswService(
+  entry: WinswEntry,
+  deps: WinswInstallDeps = {},
+  state?: WinswServiceTokenDefinitionState,
+): Promise<void> {
   const ensureBinary = deps.ensureBinary ?? ensureWinswBinary;
   const writeXml = deps.writeXml ?? ((path: string, content: string) => writeFileSync(path, content, "utf8"));
   const interactive = deps.interactive ?? runWinswInteractive;
@@ -287,7 +307,7 @@ export async function installWinswService(entry: WinswEntry, deps: WinswInstallD
   const status = deps.status ?? statusWinswRaw;
 
   await ensureBinary();
-  writeXml(winswXmlPath(), buildWinswXml(entry));
+  writeXml(winswXmlPath(), buildWinswXml(entry, process.env, undefined, state));
   const existing = status();
   if (existing === "unknown") {
     throw new Error(

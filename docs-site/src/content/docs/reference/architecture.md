@@ -120,8 +120,12 @@ single non-streaming response object from the same events.
 provider CRUD and key pools, model selection/context caps/v2 controls, catalog sync, diagnostics and
 debug logs, usage and quotas, sidecar settings, updates, generated client API keys, OAuth login/status/
 logout and account selection, Codex account management, and graceful stop. `server/auth-cors.ts`
-requires `OPENCODEX_API_AUTH_TOKEN` for both `/api/*` and `/v1/*` when the proxy binds beyond
-loopback; configured `corsAllowOrigins` entries extend the local-origin allowlist.
+admits data-plane credentials only to `/v1/*` and its WebSocket handshakes, while
+`server/management-auth.ts` independently admits `OPENCODEX_ADMIN_AUTH_TOKEN`, the protected admin
+token file, or a short-lived same-origin loopback GUI session only to `/api/*`. Missing or failed
+management state returns `503` without stopping `/v1/*` or `/healthz`; configured
+`corsAllowOrigins` entries extend only the data-plane origin allowlist and never authorize
+cross-origin management requests or GUI-session issuance.
 
 OAuth implementations live in `oauth/`; access tokens are loaded or refreshed immediately before a
 routed call, while `oauth/token-guardian.ts` can proactively refresh only providers whose policy

@@ -6,7 +6,10 @@ export interface NpmInvocationDeps {
 export interface NpmInvocation {
   file: string;
   args: string[];
-  options: { windowsVerbatimArguments?: boolean };
+  options: {
+    windowsVerbatimArguments?: boolean;
+    env?: NodeJS.ProcessEnv;
+  };
 }
 
 export declare function resolveNpmCommand(

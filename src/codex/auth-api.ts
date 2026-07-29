@@ -1009,8 +1009,9 @@ export async function handleCodexAuthAPI(
         let completed = false;
         for (let i = 0; i < 150; i++) {
           await new Promise(r => setTimeout(r, 2000));
+          if (codexAuthLoginState.get(flowId)?.status !== "pending") return;
           const st = getLoginStatus("chatgpt");
-          if (st.done && st.loggedIn) {
+          if (st?.done && st.loggedIn) {
             const { getCredential } = await import("../oauth/store");
             const cred = getCredential("chatgpt");
             if (cred) {
@@ -1154,7 +1155,7 @@ export async function handleCodexAuthAPI(
             }
             break;
           }
-          if (st.done && st.error) {
+          if (st?.done && st.error) {
             codexAuthLoginState.set(flowId, { status: "error", error: st.error, doneAt: Date.now() });
             completed = true;
             break;

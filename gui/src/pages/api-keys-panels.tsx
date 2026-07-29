@@ -257,14 +257,16 @@ export function ApiKeysModelsPanel({
                         <button type="button" className="btn btn-sm btn-ghost" onClick={() => { onCopyModelId(modelId); }}>
                           {copiedModelId === modelId ? t("api.modelCopied") : t("api.copyModelId")}
                         </button>
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-ghost"
-                          disabled={testState === "testing"}
-                          onClick={() => { onTestModel(model); }}
-                        >
-                          {testState === "testing" ? t("api.testingModel") : t("api.testModel")}
-                        </button>
+                        {model.managementTestable !== false && (
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-ghost"
+                            disabled={testState === "testing"}
+                            onClick={() => { onTestModel(model); }}
+                          >
+                            {testState === "testing" ? t("api.testingModel") : t("api.testModel")}
+                          </button>
+                        )}
                       </div>
                       {testState === "ok" && <p className="muted small api-test-note api-test-note--ok">{t("api.testSucceeded")}</p>}
                       {testState === "error" && <p className="muted small api-test-note api-test-note--error">{modelTests[modelId]?.detail ?? t("api.testFailed")}</p>}

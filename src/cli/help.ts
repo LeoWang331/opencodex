@@ -32,7 +32,7 @@ const helpEntries: Record<string, HelpEntry> = {
     summary: "Remove service/shim/config and restore native Codex.",
     details: [
       "Alias: ocx remove",
-      "Config cleanup requires ownership metadata created by a fresh install; legacy or shared directories are left in place.",
+      "Config cleanup requires valid ownership metadata. Only manifest-listed paths are removed; unowned files remain, and legacy nonempty directories are never automatically claimed.",
     ],
   },
   remove: {
@@ -40,7 +40,7 @@ const helpEntries: Record<string, HelpEntry> = {
     summary: "Remove service/shim/config and restore native Codex.",
     details: [
       "Alias of: ocx uninstall",
-      "Config cleanup requires ownership metadata created by a fresh install; legacy or shared directories are left in place.",
+      "Config cleanup requires valid ownership metadata. Only manifest-listed paths are removed; unowned files remain, and legacy nonempty directories are never automatically claimed.",
     ],
   },
   service: {

@@ -12,6 +12,7 @@ import {
   reasoningSummaryDeliveryRecordConfigError,
 } from "../config";
 import { providerDestinationConfigError } from "../lib/destination-policy";
+import { activeAdminToken } from "../lib/admin-secrets";
 import { getProviderRegistryEntry, providerCodexAccountMode } from "../providers/registry";
 import { providerConfigSeed } from "../providers/derive";
 import type { OcxConfig, OcxProviderConfig } from "../types";
@@ -221,10 +222,13 @@ export function isDataPlaneAdmissionSecret(token: string, config: OcxConfig): bo
   return false;
 }
 
-/** Whether `token` is the environment-provided management secret. */
-export function isManagementAdmissionSecret(token: string): boolean {
+/** Whether `token` is an explicit or active management secret for this config instance. */
+export function isManagementAdmissionSecret(token: string, config?: OcxConfig): boolean {
   const actual = token.trim();
-  return !!actual && secretEquals(actual, configuredAdminAuthToken());
+  return !!actual && (
+    secretEquals(actual, configuredAdminAuthToken())
+    || (!!config && secretEquals(actual, activeAdminToken(config)))
+  );
 }
 
 /** Whether `token` is one of the proxy's own admission secrets and must never reach an upstream. */
@@ -232,7 +236,7 @@ export function isProxyAdmissionSecret(token: string, config: OcxConfig): boolea
   const actual = token.trim();
   if (!actual) return false;
   if (/^ocx_(?:data|admin|session)_/.test(actual) || /^ocx_[0-9a-f]{40}$/.test(actual)) return true;
-  return isDataPlaneAdmissionSecret(actual, config) || isManagementAdmissionSecret(actual);
+  return isDataPlaneAdmissionSecret(actual, config) || isManagementAdmissionSecret(actual, config);
 }
 
 export class ForwardAdmissionCredentialError extends Error {

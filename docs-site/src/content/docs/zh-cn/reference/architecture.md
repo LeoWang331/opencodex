@@ -116,9 +116,11 @@ item，因此 MCP 命名空间、`apply_patch` 风格的 freeform 工具和客�
 `server/management/*.ts`。其 `/api/*` route 涵盖安全的配置/设置、provider
 CRUD 与 key pool、模型选择/context cap/v2 控制、catalog sync、诊断与 debug log、usage 与
 quota、sidecar 设置、更新、生成客户端 API key、OAuth 登录/状态/登出与账号选择、Codex 账号
-管理，以及 graceful stop。proxy 绑定到 loopback 之外时，`server/auth-cors.ts` 会要求
-`/api/*` 和 `/v1/*` 都提供 `OPENCODEX_API_AUTH_TOKEN`；配置的 `corsAllowOrigins` 会扩展本地
-origin allowlist。
+管理，以及 graceful stop。`server/auth-cors.ts` 只允许数据面凭据进入 `/v1/*` 及其 WebSocket
+握手；`server/management-auth.ts` 则独立允许 `OPENCODEX_ADMIN_AUTH_TOKEN`、受保护的管理 token
+文件或短期同源 loopback GUI 会话进入 `/api/*`。管理状态缺失或失败时返回 `503`，不会停止
+`/v1/*` 或 `/healthz`；配置的 `corsAllowOrigins` 只扩展数据面 origin allowlist，绝不会授权
+跨 origin 管理请求或 GUI 会话签发。
 
 OAuth 实现在 `oauth/` 中；每次路由调用前都会即时加载或刷新 access token，而
 `oauth/token-guardian.ts` 只会主动刷新策略允许的 provider。Codex/ChatGPT pool credential 与

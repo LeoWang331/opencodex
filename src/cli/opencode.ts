@@ -23,6 +23,7 @@ import { loadConfig } from "../config";
 import { visibleNativeSlugs } from "../codex/catalog";
 import { shouldInjectApiAuthHeader } from "../codex/inject";
 import { commandInvocation } from "../lib/win-exec";
+import { configuredAdminToken } from "../lib/admin-secrets";
 import { loadServiceTokenFromFile, serviceApiTokenFilePath } from "../lib/service-secrets";
 import { providerCodexAccountMode } from "../providers/registry";
 import { findLiveProxy, probeHostname, type LiveProxy } from "../server/proxy-liveness";
@@ -603,6 +604,10 @@ export function opencodeApiKey(config: OcxConfig, env: OpencodeLaunchEnv = proce
   return config.apiKeys?.[0]?.key || "ocx";
 }
 
+export function opencodeManagementApiKey(): string | null {
+  return configuredAdminToken();
+}
+
 async function ensureProxyForOpencode(config: OcxConfig): Promise<LiveProxy | null> {
   const live = await findLiveProxy();
   if (live) return live;
@@ -651,9 +656,14 @@ export async function cmdOpencode(args: string[]): Promise<number> {
   }
 
   const apiKey = opencodeApiKey(config);
+  const managementApiKey = opencodeManagementApiKey();
+  if (!managementApiKey) {
+    console.error("❌ Could not fetch the model catalog from the proxy: management credential unavailable.");
+    return 1;
+  }
   let proxyModels: OpencodeProxyModelRow[];
   try {
-    proxyModels = await fetchOpencodeProxyModels(live, apiKey);
+    proxyModels = await fetchOpencodeProxyModels(live, managementApiKey);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     console.error(`❌ Could not fetch the model catalog from the proxy: ${reason}`);

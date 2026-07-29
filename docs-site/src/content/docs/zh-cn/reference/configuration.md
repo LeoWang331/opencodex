@@ -24,7 +24,7 @@ no-replace 方式创建 `config.json.pre-openai-tiers-v2.bak`，并把已知旧 
 | Field | Type | Default | 含义 |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | 代理监听端口。 |
-| `hostname?` | `string` | `"127.0.0.1"` | 绑定地址。设为 `"0.0.0.0"` 可暴露到 LAN（需要 `OPENCODEX_API_AUTH_TOKEN`；见下文 [远程访问](#远程访问)）。 |
+| `hostname?` | `string` | `"127.0.0.1"` | 绑定地址。设为 `"0.0.0.0"` 可暴露到 LAN（数据面需要 `OPENCODEX_API_AUTH_TOKEN` 或 `config.apiKeys`，管理面独立认证；见下文 [远程访问](#远程访问)）。 |
 | `proxy?` | `string` | — | 出站 HTTP(S) proxy URL 或 `${ENV_VAR}` 引用。对应 env 未设置时应用到 `HTTP_PROXY` / `HTTPS_PROXY`；loopback 会保留在 `NO_PROXY` 中。 |
 | `providers` | `Record<string, OcxProviderConfig>` | — | provider 名称 → 配置的映射。 |
 | `openaiProviderTierVersion?` | `2` | migration 设置 | 单一选项式 OpenAI projection 完成标记。 |
@@ -45,7 +45,7 @@ no-replace 方式创建 `config.json.pre-openai-tiers-v2.bak`，并把已知旧 
 | `connectTimeoutMs?` | `number` | `200000` | 每次尝试仅等待 DNS/TCP/TLS 和最终响应 header 的 deadline；在响应 body 生成前结束。 |
 | `shutdownTimeoutMs?` | `number` | `5000` | 中止活跃 turn 前的 graceful drain deadline。 |
 | `websockets?` | `boolean` | `false` | 公布 `supports_websockets`，让 Codex 使用 Responses WebSocket 路径。省略或设为 `false` 会保持 HTTP/SSE。 |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | 非 loopback 绑定下，management 和 data-plane 认证额外接受的生成式 `ocx_…` credential。由仪表盘管理；条目字段见下文。 |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | 仅供 `/v1/*` 及对应 WebSocket 握手使用的附加数据面 `ocx_…` credential，绝不授权 `/api/*`。由仪表盘管理；条目字段见下文。 |
 | `codexAutoStart?` | `boolean` | `true` | 允许 Codex shim 在启动 Codex 前运行 `ocx ensure`。`false` 会让 `ocx ensure` 不执行任何操作。 |
 | `codexShimAutoRestore?` | `boolean` | `true` | 已完成的外部 Codex 更新替换此前安装的 shim 时自动恢复。若要关闭，请设为 `false`，或为进程设置 `OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`。 |
 | `syncResumeHistory?` | `boolean` | `true` | 可逆的 Codex App 历史兼容模式。opencodex 会备份原始 Codex thread metadata，把旧 OpenAI interactive row 重映射到 `opencodex`，并暂时把 opencodex 创建的 `exec` row 提升成 App 可见 source。`ocx stop` / `ocx restore` 会恢复已备份的 OpenAI row，并把剩余 opencodex user thread 转回 OpenAI，使原生 Codex 在从 `config.toml` 移除代理后仍能继续这些 thread。设为 `false` 可退出该模式。 |
@@ -62,7 +62,7 @@ no-replace 方式创建 `config.json.pre-openai-tiers-v2.bak`，并把已知旧 
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | 开启 | 网络搜索 sidecar 选项（见下文）。 |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | 开启 | 视觉 sidecar 选项（见下文）。 |
 | `tokenGuardian?` | `OcxTokenGuardianConfig` | 关闭 | 可选的 proactive OAuth 刷新和 Codex account warmup 策略；字段见下文。 |
-| `corsAllowOrigins?` | `string[]` | `[]` | CORS 额外允许的精确 origin。loopback origin 始终允许。 |
+| `corsAllowOrigins?` | `string[]` | `[]` | 数据面 CORS 额外允许的精确 origin。loopback origin 始终允许；该字段不会扩展管理面 CORS 或 GUI 会话签发范围。 |
 
 `codexAccountNamespaces` 的 key 是公开 selector：长度为 1–64 个字符，首尾必须是 ASCII 字母或数字，
 中间可使用字母、数字、`.`、`_` 或 `-`；保留的 JavaScript object 名称会被拒绝。value 必须是有效的
@@ -116,32 +116,79 @@ threshold；未知 usage 不强制切换）后按稳定排序进入下一个。�
 | `codexWarmupMaxAgeSeconds?` | `number` | `691200` | 账号在 8 天后重新验证。 |
 | `codexWarmupModel?` | `string` | `gpt-5.4-mini` | 可选 warmup 使用的原生模型。 |
 
+## Provider 诊断外联安全
+
+仪表盘的 provider 连接测试和实时模型发现使用有界、仅 `GET` 的外联传输。未配置出站代理时，
+opencodex 只解析一次 provider 主机名，并只连接到该次验证通过的地址。`HTTPS` 会保留原主机名用于
+`Host`、`SNI` 和证书验证；provider 配置无法关闭证书验证。
+
+当与 URL 协议对应的 `HTTP_PROXY` 或 `HTTPS_PROXY` 生效时，这两个操作会保留 Bun 原生 `fetch`，
+避免静默绕过既有代理。小写的 `http_proxy`、`https_proxy` 和 `no_proxy` 优先于对应的大写变量，
+即使小写值为空也是如此。内置 Bun 1.3.14 不使用 `ALL_PROXY`；如果它是该 URL 协议唯一有效的代理声明，
+连接测试和模型发现会安全拒绝请求，并提示设置对应的协议变量。URL 和字面地址检查仍会执行；
+本机 DNS 成功解析出的地址会被分类，但本机 DNS
+解析失败时允许继续，因为仅代理网络通常把域名解析交给代理。最终路由、DNS 答案和对端均由代理选择，
+因此 opencodex 会记录此路径无法固定或验证代理选中的对端。这是明确的安全限制，并不等同于防住
+DNS 重绑定。
+
+配置出站代理时，私网或本地 provider 目的地必须同时设置 `allowPrivateNetwork: true` 并命中
+`NO_PROXY`。回环条目会自动加入 `NO_PROXY`；像 `192.168.1.50` 这样的局域网 provider 必须显式
+加入，否则连接测试和模型发现会给出可操作的拒绝信息，而不会把请求发给代理。即使启用了
+`allowPrivateNetwork`，元数据和链路本地目的地仍会被拒绝。安全检查支持 `NO_PROXY` 中的精确主机、
+域名后缀、可选端口、带方括号的 IPv6 和 `*`，但不解析 CIDR；请逐个列出私网 provider 的主机名或地址。
+
+直连和代理两条诊断路径都会拒绝重定向，并报告已剥离凭据的目标地址；请直接配置最终 provider URL。
+普通 provider 请求、流式响应和重试路径本阶段尚未迁移，其重定向处理和逐跳目的地复核仍属延期项，
+因此本阶段没有关闭主请求路径的重定向问题。
+
 ## 远程访问
 
 opencodex 默认只绑定到 `127.0.0.1`（loopback）。当 `hostname` 设置为 `0.0.0.0` 等非 loopback
-地址时，management API（`/api/*`）和 data plane（`/v1/responses`）都会强制 token 认证。
+地址时，`/v1/*` 及对应 WebSocket 握手必须至少配置一种数据面凭据：
+`OPENCODEX_API_AUTH_TOKEN`（直接设置或通过受保护的 `service-api-token` 文件投递），或至少一个
+仪表盘生成的 `config.apiKeys` 条目。
 
-启动前设置 `OPENCODEX_API_AUTH_TOKEN`：
+启动前配置任一种数据面凭据。下面演示环境 token 形式；远程运维人员或自动化需要稳定凭据时，
+再显式设置独立的管理 token：
 
 ```bash
-export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
+export OPENCODEX_API_AUTH_TOKEN="your-data-plane-token"
+export OPENCODEX_ADMIN_AUTH_TOKEN="your-management-token"
 ocx start
 ```
 
-非 loopback 绑定缺少该变量时，代理会拒绝启动。若要为 LAN 访问安装后台服务，也应先 export
-同一变量，再运行 `ocx service install`，让 launchd、systemd 或 Task Scheduler 收到 token。
-客户端必须在每个请求的 `x-opencodex-api-key` header 中提供 token：
+非 loopback 绑定同时缺少数据面环境 token 和 `config.apiKeys` 时，代理会拒绝启动。管理面独立认证：
+`OPENCODEX_ADMIN_AUTH_TOKEN` 或单独生成并加固权限的 `admin-api-token` 文件只授权
+`/api/*`。服务安装会通过受保护的 `service-admin-token` 投递文件保存显式管理 token；它仍属于
+管理凭据，并不是第四类凭据。
+
+:::caution[凭据迁移]
+旧版本还允许 `OPENCODEX_API_AUTH_TOKEN` 和 `config.apiKeys` 访问 `/api/*`。拆分后它们只属于
+数据面。已有管理脚本必须改用 `OPENCODEX_ADMIN_AUTH_TOKEN` 或受保护的 `admin-api-token`；
+数据面客户端无需修改。
+:::
+
+运行 `ocx service install` 前应 export 所需的显式 token。安装器会把值写入受保护的
+`service-api-token` 和 `service-admin-token` 投递文件；launchd、systemd、Task Scheduler 和
+WinSW 的服务定义只保存对应文件路径，绝不保存 token 明文。客户端在
+`x-opencodex-api-key` header 中提供当前请求平面的凭据：
 
 ```
-x-opencodex-api-key: your-secret-token
+x-opencodex-api-key: the-token-for-this-request-plane
 ```
 
-也可以使用 `Authorization: Bearer …` header。启动后，仪表盘生成的 `apiKeys` 可代替环境 token。
-所有候选值均用常量时间（`timingSafeEqual`）比较，避免 timing side-channel。
+为兼容所有数据面接口，应使用 `x-opencodex-api-key`。管理接口和允许 bearer 准入的数据接口也
+接受 `Authorization: Bearer …`，但 `/v1/responses`、`/v1/responses/compact`、
+`/v1/chat/completions` 和 Responses WebSocket 握手必须使用专用的
+`x-opencodex-api-key` header。数据面和管理面凭据不能互换。合法同源的 loopback 仪表盘入口
+会获得一个短期、绑定 Origin 的 GUI 会话，该会话也只授权 `/api/*`；远程运维人员和脚本必须使用
+管理 token。管理凭据创建、权限加固或读取失败时，所有 `/api/*` 请求都返回 `503`，但 `/v1/*`
+和免鉴权的 `/healthz` 会继续工作。长期数据面和管理秘密以及 GUI CSRF token 使用常量时间
+（`timingSafeEqual`）比较；短期高熵 GUI 会话 id 使用内存查找。
 
 :::caution[LAN 暴露]
 绑定到 `0.0.0.0` 会把代理和所有已配置 provider credential 暴露到本地网络。只应在可信网络中
-使用，并始终设置强 `OPENCODEX_API_AUTH_TOKEN`。
+使用，并为数据面和管理面设置强度足够且彼此不同的 token。
 :::
 
 ## Providers（`OcxProviderConfig`）

@@ -14,6 +14,11 @@ import { COMBO_NAMESPACE, comboConfigIssues } from "./combos/types";
 import { hardenSecretDir, hardenSecretPath, hardenSecretPathAsync } from "./lib/windows-secret-acl";
 import { recordOwnedConfigPath } from "./lib/config-ownership";
 import { providerDestinationConfigError } from "./lib/destination-policy";
+import {
+  outboundProxyConfigured,
+  selectedProxyEnv,
+  type ProxyEnvMap,
+} from "./lib/proxy-env";
 import { openRouterRoutingConfigError } from "./providers/openrouter-routing";
 import {
   isWirePinnedModel,
@@ -408,8 +413,8 @@ export function expandUserPath(raw: string): string {
 
 let resolvedConfigDirCache: { raw: string | undefined; path: string } | null = null;
 
-function resolveConfigDir(): string {
-  const raw = process.env["OPENCODEX_HOME"]?.trim() || undefined;
+export function resolveConfigDir(env: Record<string, string | undefined> = process.env): string {
+  const raw = env.OPENCODEX_HOME?.trim() || undefined;
   if (resolvedConfigDirCache && resolvedConfigDirCache.raw === raw) return resolvedConfigDirCache.path;
   const path = raw ? resolve(expandUserPath(raw)) : join(homedir(), ".opencodex");
   resolvedConfigDirCache = { raw, path };
@@ -1612,12 +1617,20 @@ export function resolveEnvValue(value: string | undefined): string | undefined {
  * CLI's own health checks and running-proxy API calls stay direct. Call once per process entry
  * that makes outbound provider requests (server start, catalog sync).
  */
-export function applyProxyEnv(config: OcxConfig): void {
+export function applyProxyEnv(
+  config: OcxConfig,
+  env: ProxyEnvMap = process.env,
+): void {
   const proxy = resolveEnvValue(config.proxy);
-  if (!proxy) return;
-  if (!process.env.HTTP_PROXY?.trim() && !process.env.http_proxy?.trim()) process.env.HTTP_PROXY = proxy;
-  if (!process.env.HTTPS_PROXY?.trim() && !process.env.https_proxy?.trim()) process.env.HTTPS_PROXY = proxy;
-  const existing = process.env.NO_PROXY ?? process.env.no_proxy ?? "";
+  if (!proxy && !outboundProxyConfigured(env)) return;
+  if (proxy) {
+    for (const key of ["HTTP_PROXY", "HTTPS_PROXY"] as const) {
+      const selected = selectedProxyEnv(key, env);
+      if (!selected?.value.trim()) env[selected?.key ?? key] = proxy;
+    }
+  }
+  const selectedNoProxy = selectedProxyEnv("NO_PROXY", env);
+  const existing = selectedNoProxy?.value ?? "";
   const entries = existing.split(",").map(s => s.trim()).filter(Boolean);
   const seen = new Set(entries.map(e => e.toLowerCase()));
   for (const host of ["localhost", "127.0.0.1", "::1", "[::1]"]) {
@@ -1626,7 +1639,7 @@ export function applyProxyEnv(config: OcxConfig): void {
       seen.add(host);
     }
   }
-  process.env.NO_PROXY = entries.join(",");
+  env[selectedNoProxy?.key ?? "NO_PROXY"] = entries.join(",");
 }
 
 export function writePid(pid: number): void {

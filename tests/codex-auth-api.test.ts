@@ -2321,7 +2321,8 @@ describe("codex-auth API", () => {
 
   test("OAuth pool login waits for the current flow to finish, not stale credentials", async () => {
     const source = await Bun.file("src/codex/auth-api.ts").text();
-    expect(source).toContain("st.done && st.loggedIn");
+    expect(source).toContain('codexAuthLoginState.get(flowId)?.status !== "pending"');
+    expect(source).toContain("st?.done && st.loggedIn");
     expect(source).toContain("Login timed out before OAuth completed.");
   });
 

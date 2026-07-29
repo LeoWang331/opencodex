@@ -2,17 +2,29 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   chmodSync,
   closeSync,
+  existsSync,
   fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { adminApiTokenFilePath } from "../lib/admin-secrets";
+import {
+  adminApiTokenFilePath,
+  clearActiveAdminToken,
+  registerActiveAdminToken,
+  serviceAdminTokenFilePath,
+} from "../lib/admin-secrets";
+import {
+  CONFIG_OWNER_FILE,
+  CONFIG_UNINSTALL_MANIFEST,
+  recordOwnedConfigPath,
+} from "../lib/config-ownership";
 import { hardenSecretDir, hardenSecretPath } from "../lib/windows-secret-acl";
 import type { OcxConfig } from "../types";
 import {
@@ -26,6 +38,10 @@ import {
 
 const GUI_SESSION_TTL_MS = 5 * 60_000;
 const GUI_SESSION_LIMIT = 128;
+const MANAGEMENT_AUTH_UNAVAILABLE_WARNING =
+  "[opencodex] Management API disabled: its credential could not be initialized securely. "
+  + "Check the protected management token file and its permissions, then restart OpenCodex. "
+  + "Data-plane routes and /healthz remain available.";
 
 interface GuiSessionRecord {
   csrfToken: string;
@@ -59,7 +75,7 @@ function assertSafeDirectory(path: string): void {
   if (!hardened.ok) throw new Error("management token directory ACL hardening did not complete");
 }
 
-function readExistingToken(path: string): string {
+function readExistingToken(path: string, kind: "primary" | "service" = "primary"): string {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 512) {
     throw new Error("management token path is not a regular secret file");
@@ -68,8 +84,21 @@ function readExistingToken(path: string): string {
   const hardened = hardenSecretPath(path, { required: true });
   if (!hardened.ok) throw new Error("management token file ACL hardening did not complete");
   const token = readFileSync(path, "utf8").trim();
-  if (!/^ocx_admin_[A-Za-z0-9_-]{43}$/.test(token)) throw new Error("management token file is invalid");
+  const valid = kind === "primary"
+    ? /^ocx_admin_[A-Za-z0-9_-]{43}$/.test(token)
+    : !!token && !/[\r\n\0]/.test(token);
+  if (!valid) throw new Error("management token file is invalid");
   return token;
+}
+
+function secretPathExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 function removeBestEffort(path: string): void {
@@ -114,9 +143,21 @@ function createTokenFile(path: string): string {
 
 function ready(token: string, source: "environment" | "file", config: OcxConfig): ManagementAuthState {
   if (isDataPlaneAdmissionSecret(token, config)) {
+    clearActiveAdminToken(config);
     return fail("management credential conflicts with a data-plane credential");
   }
+  registerActiveAdminToken(config, token);
   return { available: true, token, source, sessions: new Map() };
+}
+
+function isLegacyUnownedConfigDirectory(path: string): boolean {
+  if (!existsSync(path)) return false;
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+  const entries = readdirSync(path);
+  return entries.length > 0
+    && !entries.includes(CONFIG_OWNER_FILE)
+    && !entries.includes(CONFIG_UNINSTALL_MANIFEST);
 }
 
 export function initializeManagementAuthState(config: OcxConfig): ManagementAuthState {
@@ -126,16 +167,34 @@ export function initializeManagementAuthState(config: OcxConfig): ManagementAuth
   }
   try {
     const path = adminApiTokenFilePath();
-    assertSafeDirectory(dirname(path));
-    let token: string;
-    try {
-      token = readExistingToken(path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      token = createTokenFile(path);
+    const directory = dirname(path);
+    if (secretPathExists(path)) {
+      const legacyUnownedDirectory = isLegacyUnownedConfigDirectory(directory);
+      if (!recordOwnedConfigPath(directory, path) && !legacyUnownedDirectory) {
+        throw new Error("management token ownership registration failed");
+      }
+      assertSafeDirectory(directory);
+      return ready(readExistingToken(path), "file", config);
     }
-    return ready(token, "file", config);
+
+    const configuredServicePath = process.env.OCX_ADMIN_TOKEN_FILE?.trim();
+    const servicePath = configuredServicePath || serviceAdminTokenFilePath();
+    if (configuredServicePath || secretPathExists(servicePath)) {
+      assertSafeDirectory(dirname(servicePath));
+      return ready(readExistingToken(servicePath, "service"), "file", config);
+    }
+
+    // Fresh installs establish ownership before the token makes the directory non-empty.
+    // Legacy non-owned directories deliberately remain unclaimed and continue fail-closed on uninstall.
+    const legacyUnownedDirectory = isLegacyUnownedConfigDirectory(directory);
+    if (!recordOwnedConfigPath(directory, path) && !legacyUnownedDirectory) {
+      throw new Error("management token ownership registration failed");
+    }
+    assertSafeDirectory(directory);
+    return ready(createTokenFile(path), "file", config);
   } catch (error) {
+    clearActiveAdminToken(config);
+    console.warn(MANAGEMENT_AUTH_UNAVAILABLE_WARNING);
     return fail(error instanceof Error ? error.message : "management token initialization failed");
   }
 }
@@ -157,12 +216,27 @@ function randomSessionSecret(prefix: "ocx_session_"): string {
   return `${prefix}${randomBytes(32).toString("base64url")}`;
 }
 
+function isLocalGuiDocumentNavigation(req: Request): boolean {
+  const url = new URL(req.url);
+  const site = req.headers.get("Sec-Fetch-Site")?.toLowerCase();
+  return url.pathname === "/"
+    && req.headers.get("Sec-Fetch-Dest")?.toLowerCase() === "document"
+    && req.headers.get("Sec-Fetch-Mode")?.toLowerCase() === "navigate"
+    && (site === "none" || site === "same-origin");
+}
+
 export function issueGuiSession(
   req: Request,
   config: OcxConfig,
   state: ManagementAuthState,
 ): GuiSessionBootstrap | null {
-  if (isApiAuthRequired(config) || !state.available || req.method !== "GET" || !isAllowedManagementOrigin(req, config)) return null;
+  if (
+    isApiAuthRequired(config)
+    || !state.available
+    || req.method !== "GET"
+    || !isLocalGuiDocumentNavigation(req)
+    || !isAllowedManagementOrigin(req, config)
+  ) return null;
   const host = parseHttpHost(req.headers.get("Host"));
   if (!host || !isLoopbackHostname(host.hostname)) return null;
   const origin = managementRequestOrigin(req, config);
@@ -196,7 +270,8 @@ export function requireManagementAuth(
     || req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
   if (actual && equalSecret(actual, state.token)) return null;
   if (actual && config) {
-    removeExpiredSessions(state);
+    const now = Date.now();
+    removeExpiredSessions(state, now);
     const session = state.sessions.get(actual);
     if (session) {
       const requestOrigin = managementRequestOrigin(req, config);
@@ -208,6 +283,7 @@ export function requireManagementAuth(
       const safeMethod = req.method === "GET" || req.method === "HEAD";
       const csrf = req.headers.get("x-opencodex-csrf-token")?.trim();
       if (sameOrigin && (safeMethod || (browserOrigin === session.origin && !!csrf && equalSecret(csrf, session.csrfToken)))) {
+        session.expiresAt = now + GUI_SESSION_TTL_MS;
         return null;
       }
     }

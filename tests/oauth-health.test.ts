@@ -168,6 +168,28 @@ describe("collectOAuthHealthEntries", () => {
 });
 
 describe("collectOAuthHealthEntriesForCli", () => {
+  test("authenticates live Codex health with the management credential", async () => {
+    const previousAdmin = process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+    const previousData = process.env.OPENCODEX_API_AUTH_TOKEN;
+    process.env.OPENCODEX_ADMIN_AUTH_TOKEN = "admin-health-secret";
+    process.env.OPENCODEX_API_AUTH_TOKEN = "data-health-secret";
+    try {
+      const report = await collectOAuthHealthEntriesForCli(Date.now(), {
+        findLiveProxyImpl: async () => ({ hostname: "127.0.0.1", port: 19191, pid: null }),
+        fetchImpl: async (_url, init) => {
+          expect(new Headers(init?.headers).get("authorization")).toBe("Bearer admin-health-secret");
+          return new Response(JSON.stringify({ accounts: [] }), { status: 200 });
+        },
+      });
+      expect(report.codexHealthSource).toBe("management-api");
+    } finally {
+      if (previousAdmin === undefined) delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+      else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = previousAdmin;
+      if (previousData === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
+      else process.env.OPENCODEX_API_AUTH_TOKEN = previousData;
+    }
+  });
+
   test("uses management API Codex health and does not read CLI process maps", async () => {
     markCodexAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
     const report = await collectOAuthHealthEntriesForCli(Date.now(), {
@@ -206,6 +228,20 @@ describe("collectOAuthHealthEntriesForCli", () => {
     expect(text).toContain(CODEX_HEALTH_UNAVAILABLE_NOTE);
     expect(text).not.toContain(MAIN_CODEX_ACCOUNT_ID);
   });
+
+  test.each([401, 503])(
+    "does not claim the proxy stopped when the live management API returns %i",
+    async status => {
+      const report = await collectOAuthHealthEntriesForCli(Date.now(), {
+        findLiveProxyImpl: async () => ({ hostname: "127.0.0.1", port: 19191, pid: null }),
+        fetchImpl: async () => new Response(null, { status }),
+      });
+      expect(report.codexHealthSource).toBe("unavailable");
+      expect(formatOAuthHealthForStatus(report)).toContain(
+        "proxy not running or authenticated management API unavailable",
+      );
+    },
+  );
 
   test("malformed remote health is re-derived instead of rendering undefined", async () => {
     const report = await collectOAuthHealthEntriesForCli(Date.now(), {

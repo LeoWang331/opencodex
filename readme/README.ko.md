@@ -248,7 +248,7 @@ ocx init                       # 대화형 설정
 ocx start [--port 10100]       # 프록시 시작; 포트가 사용 중이면 빈 포트로 자동 전환
 ocx stop                       # 프록시 중지 + Codex 원래 설정 복원
 ocx restore                    # 중지 없이 복원 (별칭: ocx eject)
-ocx uninstall                  # service/shim/config 제거 + Codex 원본 복원
+ocx uninstall                  # service/shim/소유 상태 제거 + Codex 원본 복원
 ocx ensure                     # 필요 시 시작 + Codex config/cache 갱신
 ocx sync                       # 모델 갱신 + Codex에 재주입
 ocx status                     # 프록시 실행 중인지 확인
@@ -317,8 +317,11 @@ ocx uninstall
 npm uninstall -g @bitkyc08/opencodex
 ```
 
-`ocx uninstall`은 프록시 중지, 설치된 service 제거, Codex shim 제거, Codex config/catalog/history
-원복, `~/.opencodex` 삭제를 처리합니다.
+`ocx uninstall`은 프록시를 중지하고 설치된 service와 Codex shim을 제거한 뒤 네이티브 Codex
+config/catalog/history를 복원합니다. 로컬 상태는 설치 소유권 매니페스트에 기록된 항목만 삭제하며,
+기록되지 않은 항목은 보존합니다. 매니페스트가 없는 기존 비어 있지 않은 설정 디렉터리와 소유 항목을
+삭제한 뒤에도 외부 파일이 남은 디렉터리는 수동 검토를 위해 그대로 둡니다. 나머지를 직접 삭제하기
+전에 명령이 보고한 경로와 내용을 확인하세요.
 
 ## 설정
 
@@ -392,21 +395,37 @@ WebSocket 전송은 기본적으로 꺼져 있습니다. Codex가 HTTP/SSE 대�
 
 ### 원격 접근
 
-기본적으로 opencodex는 `127.0.0.1`(루프백)에 바인딩되며 별도 인증이 필요 없습니다.
-`"hostname": "0.0.0.0"`으로 LAN에 노출할 경우, opencodex는 관리 API(`/api/*`)와 데이터 플레인
-(`/v1/responses`, `/v1/images/generations`, `/v1/images/edits`) 모두에 bearer 토큰을 요구합니다:
+기본적으로 opencodex는 `127.0.0.1`(루프백)에 바인딩됩니다. 자격 증명은 용도별로 분리됩니다.
+
+- **데이터 플레인 자격 증명** — `OPENCODEX_API_AUTH_TOKEN`, 보호된 `service-api-token` 파일,
+  대시보드에서 생성한 `config.apiKeys`는 `/v1/*`와 대응하는 WebSocket 핸드셰이크만 인증합니다.
+  비루프백 바인드에는 `OPENCODEX_API_AUTH_TOKEN`(직접 설정하거나 보호된 서비스 파일로 전달) 또는
+  하나 이상의 `config.apiKeys` 항목이 필요합니다.
+- **관리 자격 증명** — `OPENCODEX_ADMIN_AUTH_TOKEN` 또는 독립적으로 보호된 `admin-api-token`
+  파일은 `/api/*`만 인증합니다. 관리 환경 토큰이 없으면 서버가 파일을 생성합니다. 서비스 설치는
+  명시한 관리 토큰을 보호된 `service-admin-token` 전달 파일에 저장하지만, 이는 네 번째 종류가 아닙니다.
+- **대시보드 세션** — 정상적인 동일 출처 루프백 대시보드 진입점은 짧은 수명의 Origin 바인딩 세션을
+  받아 `/api/*`만 인증합니다. 원격 운영자와 스크립트는 관리 토큰을 사용해야 합니다.
+
+이전 릴리스에서는 `OPENCODEX_API_AUTH_TOKEN`과 `config.apiKeys`도 `/api/*`에 사용할 수 있었지만,
+분리 후에는 데이터 플레인 전용입니다. 기존 관리 스크립트는 `OPENCODEX_ADMIN_AUTH_TOKEN` 또는
+보호된 `admin-api-token`으로 전환하세요.
+
+LAN 바인드에는 어느 형태의 데이터 플레인 자격 증명이든 사용할 수 있습니다. 아래는 환경 토큰 형식이며,
+원격 운영이나 자동화에는 관리 토큰도 명시합니다.
 
 ```bash
-export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
+export OPENCODEX_API_AUTH_TOKEN="your-data-plane-token"
+export OPENCODEX_ADMIN_AUTH_TOKEN="your-management-token"
 ocx start
 ```
 
-비루프백 바인딩 시 이 환경 변수가 없으면 프록시 시작이 거부됩니다. LAN 접근용 백그라운드
-서비스를 설치할 때도 같은 셸에서 이 변수를 먼저 설정한 뒤 `ocx service install`을 실행해야 합니다.
-클라이언트(스크립트, 원격 머신)는 모든 요청에 토큰을 포함해야 합니다:
+비루프백 바인드에서 환경 토큰과 `config.apiKeys`가 모두 없으면 프록시 시작이 거부됩니다.
+백그라운드 서비스를 설치하기 전에 필요한 명시적 토큰을 같은 셸에서 export하세요. 설치 프로그램은
+보호된 전달 파일로 저장합니다. 클라이언트(스크립트, 원격 머신)는 요청 대상 면의 자격 증명을 보냅니다.
 
 ```
-x-opencodex-api-key: your-secret-token
+x-opencodex-api-key: the-token-for-this-request-plane
 ```
 
 토큰은 타이밍 공격 방지를 위해 상수 시간으로 비교됩니다.

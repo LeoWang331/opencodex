@@ -257,7 +257,7 @@ ocx init                       # 対話型セットアップ
 ocx start [--port 10100]       # プロキシ起動; ポートが使用中なら空きポートに自動切替
 ocx stop                       # プロキシ停止 + Codex を元の設定に復元
 ocx restore                    # 停止せずに復元(エイリアス: ocx eject)
-ocx uninstall                  # service/shim/config を削除 + Codex をオリジナルに復元
+ocx uninstall                  # service/shim/所有状態を削除 + Codex をオリジナルに復元
 ocx ensure                     # 必要時に起動 + Codex config/cache を更新
 ocx sync                       # モデルを更新 + Codex に再注入
 ocx status                     # プロキシは起動中か?
@@ -303,8 +303,11 @@ ocx uninstall
 npm uninstall -g @bitkyc08/opencodex
 ```
 
-`ocx uninstall` はプロキシの停止、インストールされた service の削除、Codex shim の削除、Codex config/catalog/history の
-復元、`~/.opencodex` の削除を行います。
+`ocx uninstall` はプロキシを停止し、インストールされた service と Codex shim を削除して、ネイティブ
+Codex の config/catalog/history を復元します。ローカル状態はインストール所有権マニフェストに記録された
+項目だけを削除し、それ以外は保持します。マニフェストがない旧版の空でない設定ディレクトリや、所有項目の
+削除後も外部ファイルが残るディレクトリは手動確認のため保持されます。残りを手動削除する前に、コマンドが
+報告したパスと内容を確認してください。
 
 ## 設定
 
@@ -378,21 +381,37 @@ WebSocket トランスポートはデフォルトでオフです。Codex が HTT
 
 ### リモートアクセス
 
-デフォルトで opencodex は `127.0.0.1`(ループバック)にバインドされ、追加の認証は不要です。
-`"hostname": "0.0.0.0"` で LAN に公開する場合、opencodex は管理 API(`/api/*`)とデータプレーン
-(`/v1/responses`、`/v1/images/generations`、`/v1/images/edits`)の両方に bearer トークンを要求します:
+デフォルトで opencodex は `127.0.0.1`（ループバック）にバインドします。認証情報は用途別に分離されています。
+
+- **データプレーン認証情報** — `OPENCODEX_API_AUTH_TOKEN`、保護された `service-api-token` ファイル、
+  ダッシュボードで生成した `config.apiKeys` は `/v1/*` と対応する WebSocket ハンドシェイクだけを認証します。
+  非ループバックバインドには `OPENCODEX_API_AUTH_TOKEN`（直接設定、または保護されたサービスファイル経由）
+  か、少なくとも一つの `config.apiKeys` 項目が必要です。
+- **管理認証情報** — `OPENCODEX_ADMIN_AUTH_TOKEN` または独立して保護された `admin-api-token` ファイルは
+  `/api/*` だけを認証します。管理環境トークンがなければサーバーがファイルを作成します。サービスインストールは
+  明示した管理トークンを保護された `service-admin-token` 配布ファイルに保存しますが、これは第四の種類ではありません。
+- **ダッシュボードセッション** — 正規の同一オリジンのループバック入口は、短時間かつ Origin に結び付いた
+  `/api/*` 専用セッションを受け取ります。リモート運用者とスクリプトは管理トークンを使用します。
+
+以前のリリースでは `OPENCODEX_API_AUTH_TOKEN` と `config.apiKeys` も `/api/*` に使用できましたが、
+分離後はデータプレーン専用です。既存の管理スクリプトは `OPENCODEX_ADMIN_AUTH_TOKEN` または保護された
+`admin-api-token` に切り替えてください。
+
+LAN バインドではどちらの形式のデータプレーン認証情報も使用できます。以下は環境トークン形式で、リモート運用や
+自動化には管理トークンも明示します。
 
 ```bash
-export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
+export OPENCODEX_API_AUTH_TOKEN="your-data-plane-token"
+export OPENCODEX_ADMIN_AUTH_TOKEN="your-management-token"
 ocx start
 ```
 
-非ループバックバインド時にこの環境変数がないとプロキシの起動は拒否されます。LAN アクセス用のバックグラウンド
-サービスをインストールする場合も、同じシェルでこの変数を先に設定してから `ocx service install` を実行してください。
-クライアント(スクリプト、リモートマシン)はすべてのリクエストにトークンを含める必要があります:
+非ループバックバインドで環境トークンと `config.apiKeys` の両方がなければ起動を拒否します。バックグラウンド
+サービスをインストールする前に、必要な明示トークンを同じシェルで export してください。インストーラーは保護された
+配布ファイルを介して保存します。クライアント（スクリプト、リモートマシン）はリクエスト対象面の認証情報を送ります。
 
 ```
-x-opencodex-api-key: your-secret-token
+x-opencodex-api-key: the-token-for-this-request-plane
 ```
 
 トークンはタイミング攻撃を防ぐため定数時間で比較されます。

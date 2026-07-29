@@ -4,8 +4,11 @@
 
 Provider connection tests and live model discovery share the GET-only provider outbound wrapper.
 Direct HTTP(S) resolves once and pins the validated address; HTTPS preserves the original Host/SNI
-and always verifies certificates. Proxy-configured requests stay on Bun fetch so HTTP(S)_PROXY,
-ALL_PROXY, and NO_PROXY semantics remain authoritative. The wrapper classifies successful local DNS answers, but
+and always verifies certificates. Proxy-configured requests stay on Bun fetch so its protocol-specific
+HTTP_PROXY / HTTPS_PROXY and NO_PROXY casing precedence remains authoritative. The bundled Bun 1.3.14
+does not route through ALL_PROXY; when it is the only effective proxy declaration for the URL protocol,
+connection tests and model discovery fail closed and name the corresponding protocol variable to set.
+The wrapper classifies successful local DNS answers, but
 only a typed DNS-resolution failure degrades to proxy resolution; every literal, metadata, and
 resolved-address policy error still rejects. Proxy mode logs once that the proxy-selected peer
 cannot be pinned. Private destinations additionally require allowPrivateNetwork plus NO_PROXY.

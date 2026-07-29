@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../src/config";
@@ -17,10 +17,14 @@ import {
   setIcaclsRunnerForTests,
   setPlatformForTests,
 } from "../src/lib/windows-secret-acl";
+import { removeOwnedConfigState } from "../src/lib/config-ownership";
+import { requiredManagementHeaders } from "./helpers/management-auth";
 
 const previousHome = process.env.OPENCODEX_HOME;
 const previousDataToken = process.env.OPENCODEX_API_AUTH_TOKEN;
 const previousAdminToken = process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+const WEBSOCKET_HANDSHAKE_GUARD_MS = 2_000;
+const WEBSOCKET_AUTH_TEST_TIMEOUT_MS = 10_000;
 let testHome = "";
 
 function remoteConfig(): OcxConfig {
@@ -57,7 +61,7 @@ function websocketHandshakeOpens(url: URL, token: string): Promise<boolean> {
     socket.addEventListener("open", () => finish(true));
     socket.addEventListener("error", () => finish(false));
     socket.addEventListener("close", () => finish(false));
-    const timer = setTimeout(() => finish(false), 5_000);
+    const timer = setTimeout(() => finish(false), WEBSOCKET_HANDSHAKE_GUARD_MS);
   });
 }
 
@@ -83,6 +87,12 @@ afterEach(() => {
 });
 
 describe("management and data-plane credential separation", () => {
+  test("strict management headers fail fast when no token is initialized", () => {
+    delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+
+    expect(() => requiredManagementHeaders()).toThrow("management token was not initialized");
+  });
+
   test("data and management environment tokens authorize only their own planes", async () => {
     saveConfig(remoteConfig());
     const server = startServer(0);
@@ -163,6 +173,10 @@ describe("management and data-plane credential separation", () => {
     try {
       const adminToken = readFileSync(join(testHome, "admin-api-token"), "utf8").trim();
       expect(adminToken).toMatch(/^ocx_admin_[A-Za-z0-9_-]{43}$/);
+      const uninstallManifest = JSON.parse(
+        readFileSync(join(testHome, ".opencodex-uninstall.json"), "utf8"),
+      ) as { paths: string[] };
+      expect(uninstallManifest.paths).toContain("admin-api-token");
 
       const management = await fetch(new URL("/api/config", server.url), {
         headers: { "x-opencodex-api-key": adminToken },
@@ -176,6 +190,38 @@ describe("management and data-plane credential separation", () => {
     } finally {
       await server.stop(true);
     }
+  });
+
+  test("a valid ownership manifest that cannot register the token keeps management unavailable", () => {
+    delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+    const ownerId = "00000000-0000-4000-8000-000000000001";
+    const root = realpathSync.native(testHome);
+    const owner = { version: 1, ownerId, root };
+    const manifest = {
+      ...owner,
+      paths: Array.from({ length: 1_024 }, (_, index) => `legacy-${index}`),
+    };
+    writeFileSync(join(testHome, ".opencodex-owner.json"), `${JSON.stringify(owner)}\n`, { mode: 0o600 });
+    writeFileSync(join(testHome, ".opencodex-uninstall.json"), `${JSON.stringify(manifest)}\n`, { mode: 0o600 });
+
+    const state = initializeManagementAuthState(remoteConfig());
+
+    expect(state.available).toBe(false);
+    expect(existsSync(join(testHome, "admin-api-token"))).toBe(false);
+  });
+
+  test("a legacy nonempty config directory remains unclaimed while management initializes", () => {
+    delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+    writeFileSync(join(testHome, "legacy-config.json"), "{}\n", { mode: 0o600 });
+
+    const state = initializeManagementAuthState(remoteConfig());
+
+    expect(state.available).toBe(true);
+    expect(existsSync(join(testHome, "admin-api-token"))).toBe(true);
+    expect(existsSync(join(testHome, ".opencodex-owner.json"))).toBe(false);
+    expect(existsSync(join(testHome, ".opencodex-uninstall.json"))).toBe(false);
+    expect(readFileSync(join(testHome, "legacy-config.json"), "utf8")).toBe("{}\n");
+    expect(removeOwnedConfigState(testHome).status).toBe("refused");
   });
 
   test("an icacls timeout keeps the management plane closed without stopping the data plane", async () => {
@@ -269,7 +315,12 @@ describe("management and data-plane credential separation", () => {
     config.hostname = "127.0.0.1";
     const state = initializeManagementAuthState(config);
     const pageRequest = new Request("http://localhost:10100/", {
-      headers: { Host: "localhost:10100" },
+      headers: {
+        Host: "localhost:10100",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+      },
     });
     const session = issueGuiSession(pageRequest, config, state);
     expect(session).not.toBeNull();
@@ -283,6 +334,15 @@ describe("management and data-plane credential separation", () => {
     const html = await page?.text();
     expect(html).toContain(`name="opencodex-session-token" content="${session?.token}"`);
     expect(html).toContain(`name="opencodex-session-csrf" content="${session?.csrfToken}"`);
+    const escapedPage = serveGuiFile("/", guiDist, {
+      token: `ocx_session_\"><script>unsafe</script>`,
+      csrfToken: `csrf\" onfocus=\"unsafe`,
+      origin: `http://localhost:10100/\"><script>unsafe</script>`,
+      expiresAt: Date.now() + 60_000,
+    });
+    const escapedHtml = await escapedPage?.text();
+    expect(escapedHtml).not.toContain("<script>unsafe</script>");
+    expect(escapedHtml).toContain("&quot;&gt;&lt;script&gt;unsafe&lt;/script&gt;");
 
     const sameOriginRead = new Request("http://localhost:10100/api/config", {
       headers: {
@@ -330,6 +390,54 @@ describe("management and data-plane credential separation", () => {
       headers: { Host: "attacker.test" },
     }), config, state)).toBeNull();
     expect(issueGuiSession(new Request("http://localhost:10100/"), config, state)).toBeNull();
+    expect(issueGuiSession(new Request("http://localhost:10100/anything", {
+      headers: {
+        Host: "localhost:10100",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+      },
+    }), config, state)).toBeNull();
+    expect(issueGuiSession(new Request("http://localhost:10100/", {
+      headers: {
+        Host: "localhost:10100",
+        "Sec-Fetch-Dest": "image",
+        "Sec-Fetch-Mode": "no-cors",
+        "Sec-Fetch-Site": "cross-site",
+      },
+    }), config, state)).toBeNull();
+  });
+
+  test("an active local GUI session expires after inactivity instead of page age", () => {
+    const now = spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    try {
+      const config = remoteConfig();
+      config.hostname = "127.0.0.1";
+      const state = initializeManagementAuthState(config);
+      const session = issueGuiSession(new Request("http://localhost:10100/", {
+        headers: {
+          Host: "localhost:10100",
+          "Sec-Fetch-Dest": "document",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "none",
+        },
+      }), config, state);
+      expect(session).not.toBeNull();
+
+      const request = () => new Request("http://localhost:10100/api/config", {
+        headers: {
+          Host: "localhost:10100",
+          "x-opencodex-api-key": session?.token ?? "",
+          "x-opencodex-gui-origin": "http://localhost:10100",
+        },
+      });
+      now.mockReturnValue(1_700_000_000_000 + 4 * 60_000);
+      expect(requireManagementAuth(request(), state, config)).toBeNull();
+      now.mockReturnValue(1_700_000_000_000 + 6 * 60_000);
+      expect(requireManagementAuth(request(), state, config)).toBeNull();
+    } finally {
+      now.mockRestore();
+    }
   });
 
   test("a non-loopback binding never issues a GUI session from a forged loopback Host", () => {
@@ -393,12 +501,16 @@ describe("management and data-plane credential separation", () => {
     } finally {
       await server.stop(true);
     }
-  });
+  }, WEBSOCKET_AUTH_TEST_TIMEOUT_MS);
 
   test("an invalid existing management token file keeps management unavailable", async () => {
     delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
     saveConfig(remoteConfig());
     writeFileSync(join(testHome, "admin-api-token"), "corrupt-token\n", { mode: 0o600 });
+    const warnings: string[] = [];
+    const warning = spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    });
     const server = startServer(0);
     try {
       const management = await fetch(new URL("/api/config", server.url), {
@@ -407,8 +519,16 @@ describe("management and data-plane credential separation", () => {
       expect(management.status).toBe(503);
       expect(readFileSync(join(testHome, "admin-api-token"), "utf8")).toBe("corrupt-token\n");
       expect((await fetch(new URL("/healthz", server.url))).status).toBe(200);
+      expect(warnings).toContain(
+        "[opencodex] Management API disabled: its credential could not be initialized securely. "
+        + "Check the protected management token file and its permissions, then restart OpenCodex. "
+        + "Data-plane routes and /healthz remain available.",
+      );
+      expect(warnings.join("\n")).not.toContain(testHome);
+      expect(warnings.join("\n")).not.toContain("corrupt-token");
     } finally {
       await server.stop(true);
+      warning.mockRestore();
     }
   });
 

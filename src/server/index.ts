@@ -737,7 +737,7 @@ export function startServer(port?: number) {
         return withCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, config);
       }
 
-      const guiSessionCandidate = req.method === "GET" && (url.pathname === "/" || !url.pathname.includes("."))
+      const guiSessionCandidate = req.method === "GET" && url.pathname === "/"
         ? issueGuiSession(req, config, managementAuth)
         : null;
       const guiFile = serveGuiFile(url.pathname, undefined, guiSessionCandidate ?? undefined);

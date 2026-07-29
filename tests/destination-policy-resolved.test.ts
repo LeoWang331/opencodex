@@ -80,6 +80,14 @@ describe("providerDestinationResolvedError — DNS-resolved SSRF check (activati
     expect(await providerDestinationResolvedError("custom", provider("https://api.example.com/v1"))).toBeNull();
   });
 
+  test("rejects resolver answers that are not valid IP literals", async () => {
+    lookupMock.mockResolvedValueOnce([{ address: "not-an-ip", family: 4 }]);
+    expect(await providerDestinationResolvedError(
+      "custom",
+      provider("https://invalid-answer.example/v1"),
+    )).toContain("resolves to an unsafe address (not-an-ip)");
+  });
+
   test("respects allowPrivateNetwork opt-in (no DNS enforcement)", async () => {
     lookupMock.mockClear();
     expect(await providerDestinationResolvedError("custom", provider("https://lan.example.com/v1", true))).toBeNull();
@@ -166,6 +174,15 @@ describe("providerDestinationResolvedError — canonical openai Clash fake-IP ex
 });
 
 describe("resolvePublicAddresses — caller-specific diagnostics", () => {
+  test("rejects resolver answers that are not valid IP literals", async () => {
+    lookupMock.mockResolvedValueOnce([{ address: "not-an-ip", family: 4 }]);
+
+    await expect(resolvePublicAddresses(
+      "https://invalid-answer.example/v1/models",
+      { context: "provider URL" },
+    )).rejects.toThrow("resolves to an unsafe address (not-an-ip)");
+  });
+
   test("provider callers do not receive image-URL DNS errors", async () => {
     lookupMock.mockRejectedValueOnce(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" }));
 

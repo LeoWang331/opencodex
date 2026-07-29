@@ -26,7 +26,7 @@ namespaced selected id를 bare id로 바꿉니다.
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | 프록시가 수신할 포트. |
-| `hostname?` | `string` | `"127.0.0.1"` | 바인드 주소. LAN에 공개하려면 `"0.0.0.0"`으로 설정합니다(`OPENCODEX_API_AUTH_TOKEN` 필요, 아래 [원격 접근](#원격-접근) 참조). |
+| `hostname?` | `string` | `"127.0.0.1"` | 바인드 주소. LAN에 공개하려면 `"0.0.0.0"`으로 설정합니다(데이터 플레인에는 `OPENCODEX_API_AUTH_TOKEN` 또는 `config.apiKeys`가 필요하고 관리 인증은 별도입니다. 아래 [원격 접근](#원격-접근) 참조). |
 | `proxy?` | `string` | — | 외부로 나가는 HTTP(S) 프록시 URL 또는 `${ENV_VAR}` 참조. 해당 환경 변수가 비어 있을 때 `HTTP_PROXY` / `HTTPS_PROXY`에 적용하고, loopback은 `NO_PROXY`에 유지합니다. |
 | `providers` | `Record<string, OcxProviderConfig>` | — | 프로바이더 이름 → 설정 map. |
 | `openaiProviderTierVersion?` | `2` | migration 설정 | 단일 옵션형 OpenAI projection 완료 마커. |
@@ -47,7 +47,7 @@ namespaced selected id를 bare id로 바꿉니다.
 | `connectTimeoutMs?` | `number` | `200000` | DNS/TCP/TLS와 최종 응답 헤더만 기다리는 시도별 deadline. 응답 body 생성 전 종료됩니다. |
 | `shutdownTimeoutMs?` | `number` | `5000` | 진행 중인 turn을 중단하기 전 graceful drain deadline. |
 | `websockets?` | `boolean` | `false` | `supports_websockets`를 알려 Codex가 Responses WebSocket 경로를 쓰게 합니다. 생략하거나 `false`이면 HTTP/SSE를 유지합니다. |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | 비-loopback 바인드에서 관리 API와 data plane 인증에 추가로 허용할 생성형 `ocx_…` 자격 증명. 대시보드가 관리하며 항목 필드는 아래에 설명합니다. |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | `/v1/*`와 대응하는 WebSocket 핸드셰이크에서만 허용되는 추가 데이터 플레인 `ocx_…` 자격 증명. `/api/*`를 인증하지 않습니다. 대시보드가 관리하며 항목 필드는 아래에 설명합니다. |
 | `codexAutoStart?` | `boolean` | `true` | Codex shim이 Codex 실행 전에 `ocx ensure`를 실행하게 합니다. `false`이면 `ocx ensure`가 아무 작업도 하지 않습니다. |
 | `codexShimAutoRestore?` | `boolean` | `true` | 완료된 외부 Codex 업데이트가 이전에 설치한 shim을 교체하면 자동으로 복구합니다. 끄려면 `false`로 설정하거나 프로세스에 `OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`을 설정합니다. |
 | `syncResumeHistory?` | `boolean` | `true` | 되돌릴 수 있는 Codex App 기록 호환 모드. opencodex가 원래 Codex thread metadata를 백업하고, 예전 OpenAI interactive row를 `opencodex`로 재매핑하며, opencodex가 만든 `exec` row를 App에 보이는 source로 잠시 승격합니다. `ocx stop` / `ocx restore`는 백업한 OpenAI row를 복원하고 남은 opencodex user thread를 OpenAI로 돌려 네이티브 Codex가 `config.toml`에서 프록시를 제거한 뒤에도 이어서 열 수 있게 합니다. 끄려면 `false`로 설정합니다. |
@@ -64,7 +64,7 @@ namespaced selected id를 bare id로 바꿉니다.
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | on | 웹 검색 사이드카 옵션(아래 참조). |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | on | 비전 사이드카 옵션(아래 참조). |
 | `tokenGuardian?` | `OcxTokenGuardianConfig` | off | 선택형 proactive OAuth 갱신 및 Codex 계정 warmup 정책. 필드는 아래에 설명합니다. |
-| `corsAllowOrigins?` | `string[]` | `[]` | CORS에서 추가로 허용할 정확한 origin. loopback origin은 항상 허용합니다. |
+| `corsAllowOrigins?` | `string[]` | `[]` | 데이터 플레인 CORS에서 추가로 허용할 정확한 origin. loopback origin은 항상 허용합니다. 관리 CORS나 GUI 세션 발급 범위는 확장하지 않습니다. |
 
 `codexAccountNamespaces` 키는 공개 selector입니다. 길이는 1~64자이고 시작과 끝은 ASCII 영숫자여야
 하며, 내부에는 영숫자, `.`, `_`, `-`를 사용할 수 있습니다. 예약된 JavaScript object 이름은 거부됩니다.
@@ -122,35 +122,88 @@ cooldown, health에 따라 자동 라우팅됩니다.
 | `codexWarmupMaxAgeSeconds?` | `number` | `691200` | 계정을 다시 검증할 최대 기간(8일). |
 | `codexWarmupModel?` | `string` | `gpt-5.4-mini` | 선택형 warmup에 쓸 네이티브 모델. |
 
+## 프로바이더 진단 아웃바운드 안전성
+
+대시보드의 프로바이더 연결 테스트와 실시간 모델 검색은 제한된 `GET` 전용 아웃바운드 전송을 사용합니다.
+아웃바운드 프록시가 없으면 opencodex는 프로바이더 호스트 이름을 한 번만 확인하고 검증된 주소에만
+연결합니다. `HTTPS`는 `Host`, `SNI`, 인증서 검증에 원래 호스트 이름을 유지하며 프로바이더 설정으로
+인증서 검증을 끌 수 없습니다.
+
+URL 프로토콜에 맞는 `HTTP_PROXY` 또는 `HTTPS_PROXY`가 적용되면 이 두 작업은 기존 프록시를 조용히
+우회하지 않도록 Bun 네이티브 `fetch`를 유지합니다. 소문자 `http_proxy`, `https_proxy`, `no_proxy`는
+값이 비어 있는 경우를 포함해 대응하는 대문자 변수보다 우선합니다. 번들 Bun 1.3.14는 `ALL_PROXY`를
+사용하지 않습니다. 이 변수가 URL 프로토콜에 대한 유일한 유효 프록시 선언이면 연결 테스트와 모델 검색은
+안전하게 요청을 거부하고 대응하는 프로토콜 변수를 설정하라는 안내를 표시합니다.
+URL과 리터럴 주소 검사는 계속 실행하며 로컬 DNS가
+성공하면 결과 주소를 분류합니다. 다만 프록시 전용 네트워크는 이름 확인을 프록시에 맡기는 경우가 많으므로
+로컬 DNS 실패는 허용합니다. 최종 경로, DNS 응답, 피어는 프록시가 선택하므로 opencodex는 이 경로에서
+프록시가 선택한 피어를 고정하거나 검증할 수 없음을 로그에 기록합니다. 이는 명시적인 보안 제한이며
+DNS 리바인딩에 대한 동등한 보호가 아닙니다.
+
+아웃바운드 프록시가 설정된 경우 사설 또는 로컬 프로바이더 목적지에는 `allowPrivateNetwork: true`와
+일치하는 `NO_PROXY` 항목이 모두 필요합니다. 루프백 항목은 `NO_PROXY`에 자동으로 추가됩니다.
+`192.168.1.50` 같은 LAN 프로바이더는 명시적으로 추가해야 하며, 그렇지 않으면 연결 테스트와 모델
+검색이 요청을 프록시로 보내지 않고 해결 방법과 함께 거부합니다. `allowPrivateNetwork`를 켜도 메타데이터
+및 링크 로컬 목적지는 차단됩니다. 안전 검사는 `NO_PROXY`의 정확한 호스트, 도메인 접미사, 선택적 포트,
+대괄호 IPv6, `*`를 지원하지만 CIDR은 해석하지 않습니다. 사설 프로바이더 호스트나 주소를 각각 적으세요.
+
+직접 및 프록시 진단 경로는 모두 리디렉션을 거부하고 자격 증명을 제거한 대상을 보고합니다. 최종 프로바이더
+URL을 직접 설정하세요. 일반 프로바이더 요청, 스트리밍 응답, 재시도 경로는 이번 단계에서 마이그레이션되지
+않았습니다. 해당 경로의 리디렉션 처리와 홉별 목적지 검토는 연기되어 있으므로 이번 단계가 주 요청
+리디렉션 문제를 해결하지는 않습니다.
+
 ## 원격 접근
 
 opencodex는 기본적으로 `127.0.0.1`(loopback 전용)에 바인드합니다. `hostname`을 `0.0.0.0` 같은
-비-loopback 주소로 설정하면 관리 API(`/api/*`)와 data plane(`/v1/responses`) **모두**에 token
-인증을 강제합니다.
+비-loopback 주소로 설정하면 데이터 플레인(`/v1/*`와 대응하는 WebSocket 핸드셰이크)에 하나 이상의
+자격 증명이 필요합니다. `OPENCODEX_API_AUTH_TOKEN`(직접 설정하거나 보호된 `service-api-token` 파일로
+전달) 또는 대시보드에서 생성한 `config.apiKeys` 항목을 사용할 수 있습니다.
 
-시작 전에 `OPENCODEX_API_AUTH_TOKEN` 환경 변수를 설정하세요.
+시작 전에 어느 형태든 데이터 플레인 자격 증명을 설정하세요. 아래는 환경 token 형식입니다. 원격 운영자나
+자동화에 안정적인 자격 증명이 필요하면 별도의 관리 token도 명시적으로 설정합니다.
 
 ```bash
-export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
+export OPENCODEX_API_AUTH_TOKEN="your-data-plane-token"
+export OPENCODEX_ADMIN_AUTH_TOKEN="your-management-token"
 ocx start
 ```
 
-비-loopback 바인드에서는 이 변수가 없으면 프록시가 시작되지 않습니다. LAN 접근용 백그라운드
-서비스를 설치할 때도 같은 변수를 먼저 export한 뒤 `ocx service install`을 실행해야 launchd,
-systemd, Task Scheduler에 전달됩니다. 클라이언트는 모든 요청의 `x-opencodex-api-key` 헤더에
-token을 넣어야 합니다.
+비-loopback 바인드에서는 데이터 플레인 환경 token과 `config.apiKeys`가 모두 없으면 프록시가 시작되지 않습니다.
+관리 면은
+독립적으로 인증됩니다. `OPENCODEX_ADMIN_AUTH_TOKEN` 또는 별도로 생성되고 권한이 강화된
+`admin-api-token` 파일만 `/api/*`를 인증합니다. 서비스 설치는 명시적인 관리 token을 보호된
+`service-admin-token` 전달 파일에 저장합니다. 이는 관리 자격 증명의 전달 방식이며 네 번째 자격 증명
+종류가 아닙니다.
+
+:::caution[자격 증명 마이그레이션]
+이전 릴리스에서는 `OPENCODEX_API_AUTH_TOKEN`과 `config.apiKeys`도 `/api/*`에 사용할 수 있었습니다.
+분리 후에는 데이터 플레인 전용입니다. 기존 관리 스크립트는 `OPENCODEX_ADMIN_AUTH_TOKEN` 또는 보호된
+`admin-api-token`으로 전환해야 합니다. 데이터 플레인 클라이언트는 변경할 필요가 없습니다.
+:::
+
+`ocx service install` 전에 필요한 명시적 token을 export하세요. 설치 프로그램은 값을 보호된
+`service-api-token`과 `service-admin-token` 전달 파일에 기록합니다. launchd, systemd,
+Task Scheduler, WinSW 서비스 정의에는 해당 파일 경로만 저장되고 token 원문은 저장되지 않습니다.
+클라이언트는 요청 대상 면의 자격 증명을 `x-opencodex-api-key` 헤더에 넣습니다.
 
 ```
-x-opencodex-api-key: your-secret-token
+x-opencodex-api-key: the-token-for-this-request-plane
 ```
 
-`Authorization: Bearer …` 헤더도 허용합니다. 시작 후에는 대시보드에서 생성한 `apiKeys`를 환경 변수
-token 대신 쓸 수 있습니다. 모든 후보는 timing side channel을 막기 위해 상수 시간
-(`timingSafeEqual`)으로 비교합니다.
+모든 데이터 플레인 경로와 호환되도록 `x-opencodex-api-key`를 사용하세요.
+`Authorization: Bearer …`는 관리 경로와 bearer 허용 데이터 경로에서도 사용할 수 있지만,
+`/v1/responses`, `/v1/responses/compact`, `/v1/chat/completions`, Responses WebSocket
+핸드셰이크에는 `x-opencodex-api-key`가 필요합니다. 데이터 플레인과 관리 면 자격 증명은 서로
+바꿔 쓸 수 없습니다. 유효한 동일 origin의 loopback 대시보드 진입에는 짧은 수명의 Origin 결합
+GUI 세션이 발급되며, 이 세션도 `/api/*`만 인증합니다. 원격 운영자와 스크립트는 관리 token을
+사용해야 합니다. 관리 자격 증명 생성, 권한 강화 또는 읽기에 실패하면 모든 `/api/*` 요청은 `503`을
+반환하지만, `/v1/*`와 인증이 필요 없는 `/healthz`는 계속 동작합니다. 장기 데이터 플레인 및 관리
+비밀과 GUI CSRF token은 상수 시간(`timingSafeEqual`)으로 비교하고, 수명이 짧고 엔트로피가 높은
+GUI 세션 id는 메모리 조회로 검증합니다.
 
 :::caution[LAN 노출]
 `0.0.0.0`에 바인드하면 프록시와 설정된 모든 프로바이더 자격 증명이 로컬 네트워크에 노출됩니다.
-신뢰할 수 있는 네트워크에서만 사용하고 강력한 `OPENCODEX_API_AUTH_TOKEN`을 반드시 설정하세요.
+신뢰할 수 있는 네트워크에서만 사용하고 데이터 플레인과 관리 면에 강력하고 서로 다른 token을 설정하세요.
 :::
 
 ## 프로바이더 (`OcxProviderConfig`)

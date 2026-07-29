@@ -21,6 +21,10 @@ ocx start
 bun run dev:gui
 ```
 
+Dashboard responses set `X-Frame-Options: DENY` and CSP `frame-ancestors 'none'` to prevent
+clickjacking. Embedding the dashboard in an `iframe` is intentionally unsupported; open it as a
+top-level page through `ocx gui`.
+
 ## What you can do
 
 | Area | What it does |

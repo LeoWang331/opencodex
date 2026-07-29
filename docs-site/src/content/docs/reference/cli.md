@@ -138,7 +138,11 @@ command exits 0 only when healthy and 1 otherwise, making it suitable for servic
 ### `ocx uninstall` &nbsp;·&nbsp; `ocx remove`
 
 Stop the service and proxy, remove the service and Codex shim, restore native Codex, then remove
-opencodex local config only if all restore steps succeeded. `remove` is an alias of `uninstall`.
+opencodex-owned local state only if all restore steps succeeded. Removal follows the installation
+ownership manifest; unlisted entries are preserved. A legacy non-empty config directory without a
+manifest, or a directory that still contains foreign files after owned entries are removed, remains
+in place for manual review. Inspect the reported path before deleting any remainder. `remove` is an
+alias of `uninstall`.
 
 ## Models & Codex
 

@@ -18,7 +18,10 @@ export default defineConfig({
   */
   server: proxyTarget ? {
     proxy: {
-      '/api': { target: proxyTarget, changeOrigin: true },
+      // Management origin checks compare the browser Origin with Host. Preserve the browser-facing
+      // development host/port so proxied writes keep the same-origin identity the browser used.
+      '/api': { target: proxyTarget, changeOrigin: false },
+      '/v1': { target: proxyTarget, changeOrigin: false, ws: true },
       '/healthz': { target: proxyTarget, changeOrigin: true },
     },
   } : undefined,

@@ -31,6 +31,15 @@ export function managementHeaders(initial?: HeadersInit): Headers {
   return headers;
 }
 
+/** Strict headers for tests whose setup contract requires initialized management auth. */
+export function requiredManagementHeaders(initial?: HeadersInit): Headers {
+  const token = configuredAdminToken();
+  if (!token) throw new Error("management token was not initialized");
+  const headers = new Headers(initial);
+  headers.set("x-opencodex-api-key", token);
+  return headers;
+}
+
 /** Direct-handler test request with the Host header an actual HTTP server would provide. */
 export class ManagementRequest extends globalThis.Request {
   constructor(input: RequestInfo | URL, init?: RequestInit) {

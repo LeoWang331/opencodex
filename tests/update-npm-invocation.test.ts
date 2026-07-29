@@ -76,6 +76,46 @@ describe("Windows npm update invocation", () => {
     })).toBe(`${home}\\AppData\\Roaming\\npm\\npm.cmd`);
   });
 
+  test("prevents a trusted npm.cmd shim from resolving node out of the launch directory", () => {
+    const home = "C:\\Users\\dev";
+    const project = `${home}\\untrusted`;
+    const appDataNpmDir = `${home}\\AppData\\Roaming\\npm`;
+    const appDataNpm = `${appDataNpmDir}\\npm.cmd`;
+    const nodeDir = "C:\\Program Files\\nodejs";
+    const env = {
+      PATH: `${project};.;${appDataNpmDir};${nodeDir}`,
+      PATHEXT: ".CMD",
+      SystemRoot: "C:\\Windows",
+      OCX_TEST_SENTINEL: "preserved",
+      OPENCODEX_ADMIN_AUTH_TOKEN: "admin-secret",
+      OCX_ADMIN_TOKEN_FILE: "C:\\secrets\\admin-token",
+      OPENCODEX_API_AUTH_TOKEN: "data-secret",
+      OCX_API_TOKEN_FILE: "C:\\secrets\\data-token",
+    };
+
+    const invocation = npmInvocation(["view", "pkg@latest", "version"], "win32", env, {
+      cwd: project,
+      exists: path => path === appDataNpm,
+    });
+
+    expect(invocation?.options).toMatchObject({
+      windowsVerbatimArguments: true,
+      env: {
+        PATH: `${appDataNpmDir};${nodeDir}`,
+        NoDefaultCurrentDirectoryInExePath: "1",
+        OCX_TEST_SENTINEL: "preserved",
+      },
+    });
+    for (const key of [
+      "OPENCODEX_ADMIN_AUTH_TOKEN",
+      "OCX_ADMIN_TOKEN_FILE",
+      "OPENCODEX_API_AUTH_TOKEN",
+      "OCX_API_TOKEN_FILE",
+    ]) {
+      expect(invocation?.options.env).not.toHaveProperty(key);
+    }
+  });
+
   test("fails closed when npm is available only from the current directory", () => {
     const env = {
       PATH: `${cwd};.`,
@@ -91,5 +131,57 @@ describe("Windows npm update invocation", () => {
       cwd,
       exists: path => path === `${cwd}\\npm.cmd`,
     })).toBeNull();
+  });
+});
+
+describe("POSIX npm update invocation", () => {
+  test("ignores unsafe PATH entries and resolves npm from an absolute directory", () => {
+    const project = "/work/untrusted-project";
+    const trustedNpm = "/usr/local/bin/npm";
+    const existing = new Set([
+      `${project}/npm`,
+      trustedNpm,
+    ]);
+    const env = {
+      PATH: `${project}::.:relative-bin:/usr/local/bin`,
+      OCX_TEST_SENTINEL: "preserved",
+      OPENCODEX_ADMIN_AUTH_TOKEN: "admin-secret",
+      OCX_ADMIN_TOKEN_FILE: "/run/secrets/admin-token",
+      OPENCODEX_API_AUTH_TOKEN: "data-secret",
+      OCX_API_TOKEN_FILE: "/run/secrets/data-token",
+    };
+
+    expect(resolveNpmCommand("linux", env, {
+      cwd: project,
+      exists: path => existing.has(path),
+    })).toBe(trustedNpm);
+
+    expect(npmInvocation(["view", "pkg@latest", "version"], "linux", env, {
+      cwd: project,
+      exists: path => existing.has(path),
+    })).toEqual({
+      file: trustedNpm,
+      args: ["view", "pkg@latest", "version"],
+      options: {
+        env: {
+          PATH: "/usr/local/bin",
+          OCX_TEST_SENTINEL: "preserved",
+        },
+      },
+    });
+  });
+
+  test("fails closed when PATH contains only relative or current-directory entries", () => {
+    const project = "/work/untrusted-project";
+    const env = {
+      PATH: `${project}::.:relative-bin`,
+    };
+    const deps = {
+      cwd: project,
+      exists: () => true,
+    };
+
+    expect(resolveNpmCommand("darwin", env, deps)).toBeNull();
+    expect(npmInvocation(["view", "pkg@latest", "version"], "darwin", env, deps)).toBeNull();
   });
 });

@@ -31,6 +31,7 @@ import { handleManagementAPI } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
 import { fakeChatGptJwt } from "./helpers/fake-chatgpt-jwt";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
+import { requiredManagementHeaders as managementHeaders } from "./helpers/management-auth";
 import { configuredAdminToken } from "../src/lib/admin-secrets";
 
 const previousApiToken = process.env.OPENCODEX_API_AUTH_TOKEN;
@@ -54,14 +55,6 @@ function config(hostname?: string): OcxConfig {
       },
     },
   };
-}
-
-function managementHeaders(initial?: HeadersInit): Headers {
-  const token = configuredAdminToken();
-  if (!token) throw new Error("management token was not initialized");
-  const headers = new Headers(initial);
-  headers.set("x-opencodex-api-key", token);
-  return headers;
 }
 
 const canonicalDirect = {

@@ -21,6 +21,10 @@ ocx start
 bun run dev:gui
 ```
 
+クリックジャッキングを防ぐため、ダッシュボード応答には `X-Frame-Options: DENY` と CSP
+`frame-ancestors 'none'` が設定されます。ダッシュボードの `iframe` 埋め込みは意図的に
+サポートされません。`ocx gui` からトップレベルページとして開いてください。
+
 ## できること
 
 | 領域 | 機能 |

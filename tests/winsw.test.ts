@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { buildWinswXml, ensureWinswBinary, parseWinswStatus, probeScmRegistration, sha256Hex, installWinswService, statusWinswRaw, WINSW_SHA256, WINSW_SERVICE_ID } from "../src/lib/winsw";
 import { parseServiceArgs, serviceReinstallArgs } from "../src/service";
 import { loadServiceTokenFromFile } from "../src/lib/service-secrets";
+import { configuredAdminToken, loadServiceAdminTokenFromFile } from "../src/lib/admin-secrets";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,9 +30,11 @@ describe("winsw xml", () => {
 
     expect(xml).toContain('<env name="OCX_SERVICE" value="1"/>');
     expect(xml).toContain('<env name="OCX_API_TOKEN_FILE"');
+    expect(xml).not.toContain('<env name="OCX_ADMIN_TOKEN_FILE"');
     expect(xml).toContain('<env name="PATH" value="C:\\bin;C:\\tools &amp; more"/>');
     // The token VALUE never lands in the XML — only the file pointer.
     expect(xml).not.toContain("OPENCODEX_API_AUTH_TOKEN");
+    expect(xml).not.toContain("OPENCODEX_ADMIN_AUTH_TOKEN");
   });
 
   test("escapes executable/arguments and configures restart + graceful stop", () => {
@@ -221,6 +224,23 @@ describe("app-side service token loading", () => {
       expect(loadServiceTokenFromFile({ OCX_API_TOKEN_FILE: file, OPENCODEX_API_AUTH_TOKEN: "already" })).toBeNull();
       expect(loadServiceTokenFromFile({})).toBeNull();
       expect(loadServiceTokenFromFile({ OCX_API_TOKEN_FILE: join(dir, "missing") })).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("loads the management token from a protected service file only when the env token is empty", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocx-admin-token-"));
+    const file = join(dir, "service-admin-token");
+    writeFileSync(file, "  admin-from-file  \n");
+    try {
+      expect(loadServiceAdminTokenFromFile({ OCX_ADMIN_TOKEN_FILE: file }, dir)).toBe("admin-from-file");
+      expect(configuredAdminToken(dir, {})).toBe("admin-from-file");
+      expect(loadServiceAdminTokenFromFile({
+        OCX_ADMIN_TOKEN_FILE: file,
+        OPENCODEX_ADMIN_AUTH_TOKEN: "already",
+      }, dir)).toBeNull();
+      expect(loadServiceAdminTokenFromFile({ OCX_ADMIN_TOKEN_FILE: join(dir, "missing") }, dir)).toBeNull();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

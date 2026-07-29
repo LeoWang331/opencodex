@@ -20,6 +20,9 @@ ocx start
 bun run dev:gui
 ```
 
+为防止点击劫持，仪表盘响应会设置 `X-Frame-Options: DENY` 和 CSP
+`frame-ancestors 'none'`。仪表盘有意不支持嵌入 `iframe`；请通过 `ocx gui` 将其作为顶层页面打开。
+
 ## 可以完成哪些操作
 
 | 区域 | 作用 |

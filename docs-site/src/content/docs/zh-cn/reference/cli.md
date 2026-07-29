@@ -127,7 +127,9 @@ API key、OAuth token、authorization header、请求内容、电子邮件和账
 ### `ocx uninstall` &nbsp;·&nbsp; `ocx remove`
 
 停止服务和代理，移除服务与 Codex shim，恢复原生 Codex；只有所有恢复步骤成功后，才删除
-opencodex 本地配置。`remove` 是 `uninstall` 的别名。
+opencodex 自有的本地状态。删除严格遵循安装所有权清单，未列出的条目会保留。没有清单的旧版
+非空配置目录，以及删除自有条目后仍含外来文件的目录，都会留在原处供人工复核。手工删除任何
+残留前，请先检查命令报告的路径。`remove` 是 `uninstall` 的别名。
 
 ## 模型与 Codex
 

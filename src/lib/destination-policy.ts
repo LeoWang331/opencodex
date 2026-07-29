@@ -184,7 +184,8 @@ export async function providerDestinationResolvedError(
   for (const { address } of addresses) {
     const ipKind = isIP(address);
     const assessment = ipKind === 4 ? classifyIpv4(address) : ipKind === 6 ? classifyIpv6(normalizeHostname(address)) : null;
-    if (!assessment || assessment.kind === "public") continue;
+    if (!assessment) return `baseUrl hostname ${hostname} resolves to an unsafe address (${address})`;
+    if (assessment.kind === "public") continue;
     // Clash fake-IP only: 198.18/19 benchmark detail. Mixed dangerous sets still reject.
     if (
       options?.allowBenchmarkAddresses
@@ -270,10 +271,10 @@ export async function resolvePublicAddresses(
     throw new DestinationDnsResolutionError(`${context} hostname ${hostname} could not be resolved`);
   }
   const validatedAddresses: { address: string; family: number }[] = [];
-  for (const { address, family } of addresses) {
+  for (const { address } of addresses) {
     // Prefer classifying from the address string itself — do not trust a mislabeled
     // resolver `family` that could skip IPv4/IPv6 private checks.
-    const ipKind = isIP(address) || (family === 4 || family === 6 ? family : 0);
+    const ipKind = isIP(address);
     const assessment = ipKind === 4 ? classifyIpv4(address) : ipKind === 6 ? classifyIpv6(normalizeHostname(address)) : null;
     if (!assessment || assessment.kind !== "public") {
       const allowedPrivateAddress = privateNetworkAllowed
@@ -284,7 +285,7 @@ export async function resolvePublicAddresses(
       }
       privateNetwork = true;
     }
-    validatedAddresses.push({ address, family: ipKind === 4 || ipKind === 6 ? ipKind : (family || 4) });
+    validatedAddresses.push({ address, family: ipKind });
   }
   return { hostname, addresses: validatedAddresses, privateNetwork };
 }

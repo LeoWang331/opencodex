@@ -24,15 +24,19 @@ import {
 } from "../../oauth";
 import { removeCredential } from "../../oauth/store";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
+import { signalWithTimeout } from "../../lib/abort";
+import { decodeServerSentEvents } from "../../lib/sse-decoder";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
 import { deriveProviderPresets } from "../../providers/derive";
 import { providerCodexAccountMode } from "../../providers/registry";
 import { routedSlug, slugEquals } from "../../providers/slug-codec";
-import { COMBO_NAMESPACE, comboModelId, comboPublicModelId, preservesPhysicalComboProvider } from "../../combos";
+import { COMBO_NAMESPACE, comboModelId, comboPublicModelId, preservesPhysicalComboProvider, resolveComboId } from "../../combos";
 import { clearProviderQuotaCache, fetchProviderQuotaReports } from "../../providers/quota";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { clearThreadAccountMap } from "../../codex/routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
+import { redactSecretString } from "../../lib/redact";
+import { routeModel } from "../../router";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
 import { resolveCodexHomeDir } from "../../codex/home";
 import { readUsageEntries } from "../../usage/log";
@@ -61,8 +65,168 @@ import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostR
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
 import type { ManagementContext } from "./context";
 
+function modelProbeFailureStatus(status: number): number {
+  if (status === 408 || status === 504) return 504;
+  if (status === 429) return 429;
+  if (status >= 400 && status < 500 && status !== 401 && status !== 403) return status;
+  return 502;
+}
+
+function modelProbeAbortedByCaller(request: Request, signal: AbortSignal): boolean {
+  return request.signal.aborted
+    && signal.aborted
+    && signal.reason === request.signal.reason;
+}
+
+function modelProbeTimedOut(request: Request, signal: AbortSignal): boolean {
+  if (!signal.aborted || modelProbeAbortedByCaller(request, signal)) return false;
+  const reason = signal.reason as { name?: unknown } | null | undefined;
+  return reason?.name === "TimeoutError";
+}
+
+async function modelProbeHasOutputDelta(
+  response: Response,
+  signal: AbortSignal,
+  stop: AbortController,
+): Promise<boolean> {
+  if (!response.body) return false;
+  for await (const event of decodeServerSentEvents(response.body, { signal })) {
+    if (event.data === "[DONE]") continue;
+    let payload: unknown;
+    try {
+      payload = JSON.parse(event.data);
+    } catch {
+      continue;
+    }
+    if (
+      isPlainRecord(payload)
+      && payload.type === "response.output_text.delta"
+      && typeof payload.delta === "string"
+      && payload.delta.length > 0
+    ) {
+      stop.abort(new DOMException("Model probe received output", "AbortError"));
+      return true;
+    }
+  }
+  return false;
+}
+
+function providerManagementTestable(config: OcxConfig, providerName: string): boolean {
+  const provider = config.providers[providerName];
+  if (!provider || provider.disabled === true) return false;
+  return !(
+    provider.adapter === "openai-responses"
+    && providerCodexAccountMode(providerName, provider) === "direct"
+  );
+}
+
+function managementModelTestable(config: OcxConfig, model: string): boolean {
+  if (!preservesPhysicalComboProvider(config)) {
+    const comboId = resolveComboId(config, model);
+    if (comboId) {
+      const combo = config.combos?.[comboId];
+      return Boolean(
+        combo
+        && combo.targets.length > 0
+        && combo.targets.every(target => providerManagementTestable(config, target.provider)),
+      );
+    }
+  }
+  try {
+    const route = routeModel(config, model);
+    return providerManagementTestable(config, route.providerName);
+  } catch {
+    return false;
+  }
+}
+
 export async function handleModelRoutes(ctx: ManagementContext): Promise<Response | null> {
   const { req, url, config, deps, refreshCodexCatalogBestEffort, syncClaudeAgentDefsBestEffort } = ctx;
+
+  if (url.pathname === "/api/models/test" && req.method === "POST") {
+    let body: unknown;
+    try { body = await req.json(); } catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+    if (!isPlainRecord(body) || typeof body.model !== "string") {
+      return jsonResponse({ error: "model is required" }, 400);
+    }
+    const model = body.model.trim();
+    if (!model || model.length > 512) return jsonResponse({ error: "invalid model" }, 400);
+    if (!managementModelTestable(config, model)) {
+      return jsonResponse({
+        ok: false,
+        error: "The model route graph includes an OpenAI Direct or unavailable target and cannot be tested from the management API.",
+      }, 409);
+    }
+
+    const deadline = signalWithTimeout(15_000, req.signal);
+    const stop = new AbortController();
+    const probeSignal = AbortSignal.any([deadline.signal, stop.signal]);
+    const probeRequest = new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        input: [{
+          role: "user",
+          content: [{ type: "input_text", text: "ping" }],
+        }],
+        max_output_tokens: 1,
+        stream: true,
+      }),
+      signal: probeSignal,
+    });
+    try {
+      const { handleResponses } = await import("../responses");
+      const response = await handleResponses(
+        probeRequest,
+        config,
+        { model, provider: "" },
+        { abortSignal: probeSignal },
+      );
+      if (response.ok) {
+        const sawOutput = await modelProbeHasOutputDelta(response, probeSignal, stop);
+        if (sawOutput) return jsonResponse({ ok: true });
+        if (modelProbeAbortedByCaller(req, probeSignal)) {
+          return jsonResponse({ ok: false, error: "Model test cancelled" }, 499);
+        }
+        if (modelProbeTimedOut(req, probeSignal)) {
+          return jsonResponse({ ok: false, error: "Model test timed out" }, 504);
+        }
+        return jsonResponse({ ok: false, error: "Model test returned no output" }, 502);
+      }
+      if (modelProbeAbortedByCaller(req, probeSignal)) {
+        return jsonResponse({ ok: false, error: "Model test cancelled" }, 499);
+      }
+      if (modelProbeTimedOut(req, probeSignal)) {
+        return jsonResponse({ ok: false, error: "Model test timed out" }, 504);
+      }
+
+      let error = `Model test failed (${response.status})`;
+      try {
+        const payload = await response.json() as { error?: { message?: unknown } | unknown };
+        const message = isPlainRecord(payload.error) ? payload.error.message : undefined;
+        if (typeof message === "string" && message.trim()) error = message;
+      } catch { /* keep status-only fallback */ }
+      return jsonResponse(
+        { ok: false, error: redactSecretString(error).slice(0, 400) },
+        modelProbeFailureStatus(response.status),
+      );
+    } catch (err) {
+      if (modelProbeAbortedByCaller(req, probeSignal)) {
+        return jsonResponse({ ok: false, error: "Model test cancelled" }, 499);
+      }
+      if (modelProbeTimedOut(req, probeSignal)) {
+        return jsonResponse({ ok: false, error: "Model test timed out" }, 504);
+      }
+      const message = err instanceof Error ? err.message : "Model test failed";
+      return jsonResponse({ ok: false, error: redactSecretString(message).slice(0, 400) }, 502);
+    } finally {
+      if (!stop.signal.aborted) {
+        stop.abort(new DOMException("Model probe finished", "AbortError"));
+      }
+      deadline.cleanup();
+    }
+  }
 
   if (url.pathname === "/api/models" && req.method === "GET") {
     const models = await fetchAllModels(config);
@@ -75,6 +239,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       namespaced: row.slug,
       disabled: row.disabled,
       native: true,
+      managementTestable: managementModelTestable(config, row.slug),
       ...(row.contextWindow !== undefined ? { contextWindow: row.contextWindow } : {}),
     }));
     const customModels = (config.customModels ?? []).map(cm => {
@@ -87,6 +252,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
         custom: true,
         customId: cm.id,
         displayName: cm.displayName,
+        managementTestable: managementModelTestable(config, namespaced),
         ...(cm.contextWindow ? { contextWindow: cm.contextWindow } : {}),
         ...(cm.inputModalities ? { inputModalities: cm.inputModalities } : {}),
       };
@@ -107,6 +273,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       return {
         ...m,
         namespaced,
+        managementTestable: managementModelTestable(config, namespaced),
         disabled: [...disabled].some(stored => (
           stored === namespaced || slugEquals(stored, m.provider, m.id)
         )),

@@ -241,7 +241,7 @@ ocx init                       # 交互式初始化
 ocx start [--port 10100]       # 启动代理
 ocx stop                       # 停止并恢复原生 Codex 配置
 ocx restore                    # 仅恢复，不停止（别名：ocx eject）
-ocx uninstall                  # 移除 service/shim/config 并恢复原生 Codex
+ocx uninstall                  # 移除 service/shim/自有状态并恢复原生 Codex
 ocx ensure                     # 按需启动 + 刷新 Codex config/cache
 ocx sync                       # 刷新模型列表 + 重新注入 Codex
 ocx status                     # 查看代理是否在运行
@@ -308,7 +308,10 @@ ocx uninstall
 npm uninstall -g @bitkyc08/opencodex
 ```
 
-`ocx uninstall` 会停止代理、移除已安装的 service、移除 Codex shim、恢复原生 Codex config/catalog/history，并删除 `~/.opencodex`。
+`ocx uninstall` 会停止代理、移除已安装的 service、移除 Codex shim，并恢复原生 Codex
+config/catalog/history。本地状态只会按照安装所有权清单删除；未记录在清单中的条目会保留。没有清单的
+旧版非空配置目录，以及删除自有条目后仍含外来文件的目录，都会保留以供人工复核。手工删除任何残留前，
+请先检查命令报告的路径及其内容。
 
 ## 配置
 
@@ -372,20 +375,34 @@ WebSocket 传输默认关闭。只有当你希望 Codex 使用 Responses WebSock
 
 ### 远程访问
 
-默认情况下 opencodex 绑定到 `127.0.0.1`（回环）且无需额外认证。
-如果你设置 `"hostname": "0.0.0.0"` 把代理暴露到局域网，opencodex 会要求一个 bearer token 来同时保护管理
-API（`/api/*`）和数据平面（`/v1/responses`、`/v1/images/generations`、`/v1/images/edits`）：
+默认情况下 opencodex 绑定到 `127.0.0.1`（回环）。认证按用途拆分：
+
+- **数据面凭据** — `OPENCODEX_API_AUTH_TOKEN`、受保护的 `service-api-token` 文件和仪表盘生成的
+  `config.apiKeys` 只授权 `/v1/*` 及对应的 WebSocket 握手。非回环绑定必须配置
+  `OPENCODEX_API_AUTH_TOKEN`（直接设置或通过受保护的服务文件投递）或至少一个 `config.apiKeys` 条目。
+- **管理凭据** — `OPENCODEX_ADMIN_AUTH_TOKEN` 或独立受保护的 `admin-api-token` 文件只授权
+  `/api/*`。若未配置管理环境令牌，服务器会创建该文件。服务安装通过受保护的
+  `service-admin-token` 投递文件保存显式管理令牌；这仍是管理凭据，不是第四类凭据。
+- **仪表盘会话** — 合法的同源回环仪表盘入口会获得短期、绑定 Origin 的会话，只授权 `/api/*`。
+  远程运维人员和脚本必须使用管理令牌。
+
+旧版本还允许 `OPENCODEX_API_AUTH_TOKEN` 和 `config.apiKeys` 访问 `/api/*`；拆分后它们只属于
+数据面。已有管理脚本必须改用 `OPENCODEX_ADMIN_AUTH_TOKEN` 或受保护的 `admin-api-token`。
+
+局域网绑定可使用任一数据面凭据。下面演示环境令牌形式；远程运维或自动化还应显式设置管理令牌：
 
 ```bash
-export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
+export OPENCODEX_API_AUTH_TOKEN="your-data-plane-token"
+export OPENCODEX_ADMIN_AUTH_TOKEN="your-management-token"
 ocx start
 ```
 
-绑定到非回环地址时若缺少该环境变量，代理会拒绝启动。若为局域网访问安装后台服务，请在 `ocx service install`
-之前于同一 shell 中导出相同变量，以便服务管理器接收到它。客户端（脚本、远程机器）必须在每个请求中带上 token：
+绑定到非回环地址时若环境令牌与 `config.apiKeys` 均未配置，代理会拒绝启动。安装后台服务前请在同一
+shell 中导出需要的显式令牌；安装器会通过受保护的投递文件保存它们。客户端（脚本、远程机器）必须在
+每个请求中带上对应请求平面的凭据：
 
 ```
-x-opencodex-api-key: your-secret-token
+x-opencodex-api-key: the-token-for-this-request-plane
 ```
 
 token 以常量时间比较，以防止时序攻击。

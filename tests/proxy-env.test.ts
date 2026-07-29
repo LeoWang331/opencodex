@@ -1,20 +1,24 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { applyProxyEnv } from "../src/config";
+import { PROXY_ENV_KEYS } from "../src/lib/proxy-env";
 import type { OcxConfig } from "../src/types";
 
-const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "OCX_TEST_PROXY_REF"] as const;
+const PROXY_ENV_CASED_KEYS = [
+  ...PROXY_ENV_KEYS.flatMap(key => [key, key.toLowerCase()]),
+  "OCX_TEST_PROXY_REF",
+] as const;
 let saved: Record<string, string | undefined>;
 
 beforeEach(() => {
   saved = {};
-  for (const key of PROXY_ENV_KEYS) {
+  for (const key of PROXY_ENV_CASED_KEYS) {
     saved[key] = process.env[key];
     delete process.env[key];
   }
 });
 
 afterEach(() => {
-  for (const key of PROXY_ENV_KEYS) {
+  for (const key of PROXY_ENV_CASED_KEYS) {
     if (saved[key] === undefined) delete process.env[key];
     else process.env[key] = saved[key];
   }
@@ -32,11 +36,51 @@ describe("applyProxyEnv", () => {
     expect(process.env.NO_PROXY).toBeUndefined();
   });
 
+  test("adds loopback exclusions when the proxy comes only from the environment", () => {
+    process.env.HTTPS_PROXY = "http://environment-proxy:3128";
+
+    applyProxyEnv(configWithProxy(undefined));
+
+    expect(process.env.HTTPS_PROXY).toBe("http://environment-proxy:3128");
+    expect(process.env.HTTP_PROXY).toBeUndefined();
+    expect(process.env.NO_PROXY).toBe("localhost,127.0.0.1,::1,[::1]");
+  });
+
+  test("does not treat unsupported ALL_PROXY as an active Bun proxy", () => {
+    const env: Record<string, string | undefined> = {
+      ALL_PROXY: "http://environment-proxy:3128",
+    };
+
+    applyProxyEnv(configWithProxy(undefined), env);
+
+    expect(env.ALL_PROXY).toBe("http://environment-proxy:3128");
+    expect(env.NO_PROXY).toBeUndefined();
+    expect(env.no_proxy).toBeUndefined();
+  });
+
   test("mirrors config.proxy into HTTP(S)_PROXY and excludes loopback (IPv4 + IPv6)", () => {
     applyProxyEnv(configWithProxy("http://proxy.corp:8080"));
     expect(process.env.HTTP_PROXY).toBe("http://proxy.corp:8080");
     expect(process.env.HTTPS_PROXY).toBe("http://proxy.corp:8080");
     expect(process.env.NO_PROXY).toBe("localhost,127.0.0.1,::1,[::1]");
+  });
+
+  test("writes config.proxy to lowercase keys when empty lowercase values shadow uppercase", () => {
+    const env: Record<string, string | undefined> = {
+      http_proxy: "",
+      https_proxy: "",
+    };
+    const applyWithEnv = applyProxyEnv as unknown as (
+      config: OcxConfig,
+      targetEnv: Record<string, string | undefined>,
+    ) => void;
+
+    applyWithEnv(configWithProxy("http://proxy.corp:8080"), env);
+
+    expect(env.http_proxy).toBe("http://proxy.corp:8080");
+    expect(env.https_proxy).toBe("http://proxy.corp:8080");
+    expect(env.HTTP_PROXY).toBeUndefined();
+    expect(env.HTTPS_PROXY).toBeUndefined();
   });
 
   test("user-set env vars win over config", () => {
@@ -50,6 +94,19 @@ describe("applyProxyEnv", () => {
     process.env.NO_PROXY = "internal.corp,localhost";
     applyProxyEnv(configWithProxy("http://proxy.corp:8080"));
     expect(process.env.NO_PROXY).toBe("internal.corp,localhost,127.0.0.1,::1,[::1]");
+  });
+
+  test("appends loopback entries to the lowercase no_proxy selected by Bun", () => {
+    const env: Record<string, string | undefined> = {
+      HTTP_PROXY: "http://environment-proxy:3128",
+      NO_PROXY: "upper.example",
+      no_proxy: "lower.example",
+    };
+
+    applyProxyEnv(configWithProxy(undefined), env);
+
+    expect(env.NO_PROXY).toBe("upper.example");
+    expect(env.no_proxy).toBe("lower.example,localhost,127.0.0.1,::1,[::1]");
   });
 
   test("dedup is case-insensitive against existing entries", () => {

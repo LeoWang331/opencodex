@@ -21,6 +21,10 @@ ocx start
 bun run dev:gui
 ```
 
+클릭재킹을 막기 위해 대시보드 응답은 `X-Frame-Options: DENY`와 CSP
+`frame-ancestors 'none'`를 설정합니다. 대시보드를 `iframe`에 삽입하는 방식은 의도적으로
+지원하지 않습니다. `ocx gui`로 최상위 페이지에서 여세요.
+
 ## 할 수 있는 일
 
 | 영역 | 기능 |

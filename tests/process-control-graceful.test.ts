@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
 import { gracefulStopHost, stopProxyGracefully } from "../src/lib/process-control";
 
 function okResponse(): Response {
@@ -68,6 +71,31 @@ describe("stopProxyGracefully", () => {
     });
 
     expect(headers?.["x-opencodex-api-key"]).toBe("admin-secret");
+  });
+
+  test("resolves a tilde OPENCODEX_HOME before reading the management token", async () => {
+    const configDir = mkdtempSync(join(homedir(), ".opencodex-process-control-"));
+    const tokenPath = join(configDir, "admin-api-token");
+    const adminToken = `ocx_admin_${"a".repeat(43)}`;
+    writeFileSync(tokenPath, `${adminToken}\n`, { mode: 0o600 });
+
+    try {
+      let headers: Record<string, string> | undefined;
+      await stopProxyGracefully(1, {
+        readRuntime: () => ({ port: 10100 }),
+        fetchFn: (async (_url: string | URL | Request, init?: RequestInit) => {
+          headers = init?.headers as Record<string, string>;
+          return okResponse();
+        }) as typeof fetch,
+        waitExit: () => true,
+        env: { OPENCODEX_HOME: `~/${basename(configDir)}` },
+      });
+
+      expect(headers?.["x-opencodex-api-key"]).toBe(adminToken);
+    } finally {
+      unlinkSync(tokenPath);
+      rmdirSync(configDir);
+    }
   });
 
   test("returns false when no runtime port is recorded (caller falls back to killProxy)", async () => {

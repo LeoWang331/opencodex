@@ -5,6 +5,7 @@ export interface ExternalModelRow {
   disabled?: boolean;
   native?: boolean;
   custom?: boolean;
+  managementTestable?: boolean;
 }
 
 /** Inbound gateway protocols — not inferred from provider type. */

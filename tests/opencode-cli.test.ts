@@ -21,6 +21,7 @@ import {
   opencodeCatalogFromProxyRows,
   opencodeGlobalConfigPath,
   opencodeLaunchNativeSlugs,
+  opencodeManagementApiKey,
   opencodeModelKey,
   opencodeNotFoundHint,
   opencodeProviderOverridePath,
@@ -499,6 +500,23 @@ describe("ocx opencode env assembly", () => {
 });
 
 describe("ocx opencode admission key", () => {
+  test("keeps the management catalog credential separate from the data-plane admission key", () => {
+    const previousAdmin = process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+    const previousData = process.env.OPENCODEX_API_AUTH_TOKEN;
+    process.env.OPENCODEX_ADMIN_AUTH_TOKEN = "admin-catalog-secret";
+    process.env.OPENCODEX_API_AUTH_TOKEN = "data-catalog-secret";
+    try {
+      const config = cfg();
+      expect(opencodeManagementApiKey()).toBe("admin-catalog-secret");
+      expect(opencodeApiKey(config)).toBe("data-catalog-secret");
+    } finally {
+      if (previousAdmin === undefined) delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+      else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = previousAdmin;
+      if (previousData === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
+      else process.env.OPENCODEX_API_AUTH_TOKEN = previousData;
+    }
+  });
+
   test("the environment token wins over a configured API key", () => {
     const config = cfg({ apiKeys: [{ id: "1", name: "main", key: "sk-cfg", createdAt: "2026-01-01" }] });
     expect(opencodeApiKey(config, { OPENCODEX_API_AUTH_TOKEN: "sk-env" })).toBe("sk-env");

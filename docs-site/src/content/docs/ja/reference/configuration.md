@@ -25,7 +25,7 @@ namespaced selected id を bare id に変えます。
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | プロキシがリッスンするポート。 |
-| `hostname?` | `string` | `"127.0.0.1"` | バインドアドレス。LAN に公開するには `"0.0.0.0"` に設定します（`OPENCODEX_API_AUTH_TOKEN` が必要、下記 [リモートアクセス](#リモートアクセス) 参照）。 |
+| `hostname?` | `string` | `"127.0.0.1"` | バインドアドレス。LAN に公開するには `"0.0.0.0"` に設定します（データプレーンには `OPENCODEX_API_AUTH_TOKEN` または `config.apiKeys` が必要で、管理認証は独立しています。下記 [リモートアクセス](#リモートアクセス) 参照）。 |
 | `proxy?` | `string` | — | 外向きの HTTP(S) プロキシ URL または `${ENV_VAR}` 参照。該当環境変数が空のとき `HTTP_PROXY` / `HTTPS_PROXY` に適用し、loopback は `NO_PROXY` に維持します。 |
 | `providers` | `Record<string, OcxProviderConfig>` | — | プロバイダー名 → 設定 map。 |
 | `openaiProviderTierVersion?` | `2` | 移行設定 | 単一の省略可能 OpenAI projection 完了マーカー。 |
@@ -46,7 +46,7 @@ namespaced selected id を bare id に変えます。
 | `connectTimeoutMs?` | `number` | `200000` | DNS/TCP/TLS と最終レスポンスヘッダーだけを待つ試行ごとの deadline。レスポンス body 生成前に終了します。 |
 | `shutdownTimeoutMs?` | `number` | `5000` | 進行中のターンを中断する前の graceful drain deadline。 |
 | `websockets?` | `boolean` | `false` | `supports_websockets` を知らせ Codex が Responses WebSocket 経路を使うようにします。省略または `false` なら HTTP/SSE を維持します。 |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | 非 loopback バインドで管理 API とデータプレーン認証に追加で許可する生成型 `ocx_…` 認証情報。ダッシュボードが管理し、項目フィールドは下で説明します。 |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | `/v1/*` と対応する WebSocket ハンドシェイクだけで使える追加のデータプレーン `ocx_…` 認証情報です。`/api/*` は認証しません。ダッシュボードが管理し、項目フィールドは下で説明します。 |
 | `codexAutoStart?` | `boolean` | `true` | Codex shim が Codex 実行前に `ocx ensure` を実行するようにします。`false` なら `ocx ensure` は何もしません。 |
 | `codexShimAutoRestore?` | `boolean` | `true` | 完了した外部 Codex 更新で以前にインストールした shim が置換された場合に復元します。無効にするには `false`、またはプロセスで `OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0` を設定します。 |
 | `syncResumeHistory?` | `boolean` | `true` | 戻せる Codex App 履歴互換モード。opencodex は元の Codex thread metadata をバックアップし、旧 OpenAI interactive row を `opencodex` に再マッピングし、opencodex が作成した `exec` row を App に見えるソースとして一時的に昇格します。`ocx stop` / `ocx restore` はバックアップした OpenAI row を復元し、残った opencodex user thread を OpenAI に戻し、ネイティブ Codex が `config.toml` からプロキシを削除した後でも開き続けられるようにします。オフにするには `false` に設定します。 |
@@ -63,7 +63,7 @@ namespaced selected id を bare id に変えます。
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | on | ウェブ検索サイドカーオプション（下記参照）。 |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | on | ビジョンサイドカーオプション（下記参照）。 |
 | `tokenGuardian?` | `OcxTokenGuardianConfig` | off | 選択型の proactive OAuth 更新と Codex アカウント warmup ポリシー。フィールドは下で説明します。 |
-| `corsAllowOrigins?` | `string[]` | `[]` | CORS で追加で許可する正確な origin。loopback origin は常に許可します。 |
+| `corsAllowOrigins?` | `string[]` | `[]` | データプレーン CORS で追加で許可する正確な origin。loopback origin は常に許可します。管理 CORS や GUI セッション発行の範囲は拡張しません。 |
 
 `codexAccountNamespaces` のキーは公開 selector です。長さは 1〜64 文字、先頭と末尾は ASCII
 英数字、内部には英数字、`.`、`_`、`-` を使用でき、予約済み JavaScript object 名は拒否されます。
@@ -115,35 +115,88 @@ pool アカウントの追加と quota 更新はダッシュボードの **Codex
 | `codexWarmupMaxAgeSeconds?` | `number` | `691200` | アカウントを再検証する最大期間（8 日）。 |
 | `codexWarmupModel?` | `string` | `gpt-5.4-mini` | 選択型 warmup に使うネイティブモデル。 |
 
+## プロバイダー診断の外向き通信安全性
+
+ダッシュボードのプロバイダー接続テストとライブモデル検出は、制限付きの `GET` 専用外向き通信を使用します。
+外向きプロキシがなければ、opencodex はプロバイダーのホスト名を一度だけ解決し、その検証済みアドレスにだけ
+接続します。`HTTPS` は `Host`、`SNI`、証明書検証に元のホスト名を維持し、プロバイダー設定から証明書検証を
+無効にすることはできません。
+
+URL のプロトコルに対応する `HTTP_PROXY` または `HTTPS_PROXY` が適用される場合、この二つの操作は
+既存のプロキシを暗黙に迂回しないよう Bun ネイティブの `fetch` を維持します。小文字の `http_proxy`、
+`https_proxy`、`no_proxy` は、空文字列の場合も含め、対応する大文字の変数より優先されます。同梱の
+Bun 1.3.14 は `ALL_PROXY` を使用しません。これが URL のプロトコルに対する唯一の有効なプロキシ宣言なら、
+接続テストとモデル検出は安全側に拒否し、対応するプロトコル変数を設定するよう案内します。
+URL とリテラルアドレスの検査は引き続き行い、
+ローカル DNS が成功すれば結果を分類します。ただしプロキシ専用ネットワークでは名前解決をプロキシへ委ねるのが
+一般的なため、ローカル DNS 失敗は許可します。最終ルート、DNS 応答、接続先はプロキシが選ぶので、opencodex は
+この経路でプロキシが選んだ相手を固定または検証できないことをログに記録します。これは明示的な安全上の制約であり、
+DNS リバインディングと同等の保護ではありません。
+
+外向きプロキシが設定されている場合、プライベートまたはローカルなプロバイダー宛先には
+`allowPrivateNetwork: true` と一致する `NO_PROXY` 項目の両方が必要です。ループバック項目は自動で
+`NO_PROXY` に追加されます。`192.168.1.50` のような LAN プロバイダーは明示的に追加してください。未追加なら
+接続テストとモデル検出はプロキシへ送らず、対処方法付きで拒否します。`allowPrivateNetwork` を有効にしても
+メタデータとリンクローカル宛先は拒否されます。安全検査は `NO_PROXY` の完全一致ホスト、ドメインサフィックス、
+任意ポート、角括弧付き IPv6、`*` を扱いますが CIDR は解釈しません。プライベートプロバイダーのホスト名または
+アドレスを個別に列挙してください。
+
+直結とプロキシの両診断経路はリダイレクトを拒否し、認証情報を除いた転送先を報告します。最終プロバイダー URL を
+直接設定してください。通常のプロバイダーリクエスト、ストリーミング応答、再試行経路はこの段階では未移行です。
+それらのリダイレクト処理とホップごとの宛先検査は延期中なので、この段階で主リクエストのリダイレクト問題は
+解消されません。
+
 ## リモートアクセス
 
 opencodex はデフォルトで `127.0.0.1`（loopback 専用）にバインドします。`hostname` を `0.0.0.0` のような
-非 loopback アドレスに設定すると管理 API（`/api/*`）とデータプレーン（`/v1/responses`）の **両方** に token
-認証を強制します。
+非 loopback アドレスに設定すると、データプレーン（`/v1/*` と対応する WebSocket ハンドシェイク）には
+少なくとも一つの認証情報が必要です。`OPENCODEX_API_AUTH_TOKEN`（直接設定、または保護された
+`service-api-token` ファイル経由）か、ダッシュボードで生成した `config.apiKeys` の項目を使用できます。
 
-起動前に `OPENCODEX_API_AUTH_TOKEN` 環境変数を設定してください。
+起動前にいずれかのデータプレーン認証情報を設定してください。以下は環境 token 形式です。リモート運用者や
+自動化に安定した認証情報が必要なら、独立した管理 token も明示的に設定します。
 
 ```bash
-export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
+export OPENCODEX_API_AUTH_TOKEN="your-data-plane-token"
+export OPENCODEX_ADMIN_AUTH_TOKEN="your-management-token"
 ocx start
 ```
 
-非 loopback バインドではこの変数がないとプロキシは起動しません。LAN アクセス用のバックグラウンド
-サービスをインストールするときも同じ変数を先に export したのち `ocx service install` を実行し、launchd、
-systemd、Task Scheduler に渡す必要があります。クライアントはすべてのリクエストの `x-opencodex-api-key` ヘッダーに
-token を入れる必要があります。
+非 loopback バインドではデータプレーン環境 token と `config.apiKeys` の両方がないとプロキシは起動しません。
+管理面は独立しており、
+`OPENCODEX_ADMIN_AUTH_TOKEN` または別途生成され権限が保護された `admin-api-token` ファイルだけが
+`/api/*` を認証します。サービスをインストールすると、明示した管理 token は保護された
+`service-admin-token` 配布ファイルに保存されます。これは管理認証情報の配布方法であり、第四の認証情報種別ではありません。
+
+:::caution[認証情報の移行]
+以前のリリースでは `OPENCODEX_API_AUTH_TOKEN` と `config.apiKeys` も `/api/*` に使用できました。
+分離後はデータプレーン専用です。既存の管理スクリプトは `OPENCODEX_ADMIN_AUTH_TOKEN` または保護された
+`admin-api-token` に切り替えてください。データプレーンのクライアントは変更不要です。
+:::
+
+`ocx service install` の前に必要な明示 token を export してください。インストーラーは値を保護された
+`service-api-token` と `service-admin-token` 配布ファイルへ書き込みます。launchd、systemd、
+Task Scheduler、WinSW のサービス定義には対応するファイルパスだけが保存され、token の平文は保存されません。
+クライアントは対象面の認証情報を `x-opencodex-api-key` ヘッダーに入れます。
 
 ```
-x-opencodex-api-key: your-secret-token
+x-opencodex-api-key: the-token-for-this-request-plane
 ```
 
-`Authorization: Bearer …` ヘッダーも許可します。起動後はダッシュボードで生成した `apiKeys` を環境変数
-token の代わりに使えます。すべての候補は timing side channel を防ぐため定数時間
-（`timingSafeEqual`）で比較します。
+すべてのデータプレーン経路との互換性のため、`x-opencodex-api-key` を使用してください。
+`Authorization: Bearer …` は管理 route と bearer admission を許可するデータ route でも使えますが、
+`/v1/responses`、`/v1/responses/compact`、`/v1/chat/completions`、および Responses の
+WebSocket ハンドシェイクには `x-opencodex-api-key` が必要です。データプレーンと管理面の認証情報は
+交換できません。正当な同一 origin の loopback ダッシュボード入口には、短期かつ Origin に結び付いた
+GUI セッションが発行されますが、これも `/api/*` 専用です。リモート運用者とスクリプトは管理 token を
+使う必要があります。管理認証情報の作成、権限強化、読み取りのいずれかに失敗すると、すべての `/api/*` は
+`503` を返しますが、`/v1/*` と認証不要の `/healthz` は継続します。長期のデータプレーン秘密、
+管理秘密、および GUI CSRF token は定数時間（`timingSafeEqual`）で比較し、短期で高エントロピーな
+GUI セッション id はメモリ内検索で検証します。
 
 :::caution[LAN 公開]
 `0.0.0.0` にバインドするとプロキシと設定されたすべてのプロバイダー認証情報がローカルネットワークにさらされます。
-信頼できるネットワークでのみ使い、強力な `OPENCODEX_API_AUTH_TOKEN` を必ず設定してください。
+信頼できるネットワークでのみ使い、データプレーンと管理面には強力で異なる token を設定してください。
 :::
 
 ## プロバイダー（`OcxProviderConfig`）

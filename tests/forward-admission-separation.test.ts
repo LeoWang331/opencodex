@@ -1,16 +1,20 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../src/config";
 import { resolveFirstUsableOpenAiSidecar } from "../src/providers/openai-sidecar";
 import { startServer } from "../src/server";
+import { serviceAdminTokenFilePath } from "../src/lib/admin-secrets";
+import { initializeManagementAuthState } from "../src/server/management-auth";
 import type { OcxConfig } from "../src/types";
 
 const originalFetch = globalThis.fetch;
 const previousHome = process.env.OPENCODEX_HOME;
 const previousDataToken = process.env.OPENCODEX_API_AUTH_TOKEN;
 const previousAdminToken = process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+const previousAdminTokenFile = process.env.OCX_ADMIN_TOKEN_FILE;
+const SERVICE_ADMIN_SECRET = "service-admin-without-prefix";
 let testHome = "";
 let upstreamAttempts: string[] = [];
 
@@ -35,7 +39,9 @@ beforeEach(() => {
   testHome = mkdtempSync(join(tmpdir(), "ocx-forward-admission-"));
   process.env.OPENCODEX_HOME = testHome;
   delete process.env.OPENCODEX_API_AUTH_TOKEN;
-  process.env.OPENCODEX_ADMIN_AUTH_TOKEN = "admin-secret";
+  delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+  process.env.OCX_ADMIN_TOKEN_FILE = serviceAdminTokenFilePath(testHome);
+  writeFileSync(serviceAdminTokenFilePath(testHome), `${SERVICE_ADMIN_SECRET}\n`, { mode: 0o600 });
   upstreamAttempts = [];
   globalThis.fetch = (async (input, init) => {
     const raw = input instanceof Request ? input.url : String(input);
@@ -56,6 +62,8 @@ afterEach(() => {
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousDataToken;
   if (previousAdminToken === undefined) delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
   else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = previousAdminToken;
+  if (previousAdminTokenFile === undefined) delete process.env.OCX_ADMIN_TOKEN_FILE;
+  else process.env.OCX_ADMIN_TOKEN_FILE = previousAdminTokenFile;
   if (testHome) rmSync(testHome, { recursive: true, force: true });
   testHome = "";
 });
@@ -63,10 +71,11 @@ afterEach(() => {
 describe("management credentials never leave data-plane forwarding paths", () => {
   test("the shared OpenAI sidecar refuses a management bearer", async () => {
     const config = forwardConfig();
+    expect(initializeManagementAuthState(config).available).toBe(true);
     const provider = config.providers.openai!;
     const selected = await resolveFirstUsableOpenAiSidecar(
       [{ providerName: "openai", provider, accountMode: "direct" }],
-      new Headers({ authorization: "Bearer admin-secret" }),
+      new Headers({ authorization: `Bearer ${SERVICE_ADMIN_SECRET}` }),
       config,
     );
     expect(selected).toBeUndefined();
@@ -118,7 +127,7 @@ describe("management credentials never leave data-plane forwarding paths", () =>
           method: "POST",
           headers: {
             "content-type": request.contentType,
-            authorization: "Bearer admin-secret",
+            authorization: `Bearer ${SERVICE_ADMIN_SECRET}`,
           },
           body: request.body,
         });

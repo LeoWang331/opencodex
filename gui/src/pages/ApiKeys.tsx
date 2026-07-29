@@ -3,7 +3,6 @@ import { Notice } from "../ui";
 import { useI18n, LOCALES } from "../i18n/shared";
 import { readJsonIfOk, readJsonOrThrow } from "../fetch-json";
 import {
-  classifyExternalModel,
   externalModelId,
   type ExternalModelRow,
 } from "../api-access-models";
@@ -35,6 +34,16 @@ interface KeysResponse {
 
 interface CreateKeyResponse {
   key?: unknown;
+}
+
+interface ManagementModelRow {
+  provider?: unknown;
+  namespaced?: unknown;
+  displayName?: unknown;
+  disabled?: unknown;
+  native?: unknown;
+  custom?: unknown;
+  managementTestable?: unknown;
 }
 
 export default function ApiKeys({ apiBase }: { apiBase: string }) {
@@ -87,30 +96,42 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
     setModelsLoading(true);
     setModelsLoadFailed(false);
     try {
-      const res = await fetch(`${apiBase}/v1/models`);
+      const res = await fetch(`${apiBase}/api/models`);
       if (!res.ok) {
         setModels([]);
         setModelsLoadFailed(true);
         return;
       }
-      const data = await res.json() as unknown;
-      const rawRows = Array.isArray(data)
-        ? data
-        : (typeof data === "object" && data !== null && Array.isArray((data as { data?: unknown }).data)
-          ? (data as { data: unknown[] }).data
-          : null);
-      if (!rawRows) {
+      const rawRows = await res.json() as unknown;
+      if (!Array.isArray(rawRows)) {
         setModels([]);
         setModelsLoadFailed(true);
         return;
       }
       const rows = rawRows
-        .filter((row): row is { id: string; owned_by?: string } => (
-          typeof row === "object"
-          && row !== null
-          && typeof (row as { id?: unknown }).id === "string"
-        ))
-        .map(row => classifyExternalModel(row))
+        .filter((row): row is ManagementModelRow & { provider: string; namespaced: string } => {
+          if (typeof row !== "object" || row === null) return false;
+          const { provider, namespaced, disabled } = row as ManagementModelRow;
+          return typeof provider === "string"
+            && typeof namespaced === "string"
+            && provider.trim().length > 0
+            && namespaced.trim().length > 0
+            && disabled !== true;
+        })
+        .map(row => {
+          const displayName = row.displayName;
+          return {
+            id: row.namespaced,
+            displayName: typeof displayName === "string" && displayName.trim()
+              ? displayName
+              : row.namespaced,
+            provider: row.provider,
+            disabled: row.disabled === true,
+            native: row.native === true,
+            custom: row.custom === true,
+            managementTestable: row.managementTestable !== false,
+          };
+        })
         .sort((a, b) => externalModelId(a).localeCompare(externalModelId(b)));
       setModels(rows);
     } catch {
@@ -224,18 +245,14 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
     const modelId = externalModelId(model);
     setModelTests(current => ({ ...current, [modelId]: { state: "testing" } }));
     try {
-      const res = await fetch(endpoints.chatCompletions, {
+      const res = await fetch(`${apiBase}/api/models/test`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: modelId,
-          messages: [{ role: "user", content: "ping" }],
-          max_tokens: 1,
-          stream: false,
-        }),
+        body: JSON.stringify({ model: modelId }),
       });
-      if (!res.ok) {
-        const detail = await res.text();
+      const payload = await res.json().catch(() => null) as { ok?: unknown; error?: unknown } | null;
+      if (!res.ok || payload?.ok !== true) {
+        const detail = typeof payload?.error === "string" ? payload.error : String(res.status);
         setModelTests(current => ({
           ...current,
           [modelId]: { state: "error", detail: detail.slice(0, 160) || String(res.status) },

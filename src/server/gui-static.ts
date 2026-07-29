@@ -56,13 +56,22 @@ function isFile(path: string): boolean {
   }
 }
 
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 function htmlResponse(path: string, session?: GuiSessionBootstrap): Response {
   let html = readFileSync(path, "utf8");
   if (session) {
     const bootstrap = [
-      `<meta name="opencodex-session-token" content="${session.token}">`,
-      `<meta name="opencodex-session-csrf" content="${session.csrfToken}">`,
-      `<meta name="opencodex-session-origin" content="${session.origin}">`,
+      `<meta name="opencodex-session-token" content="${escapeHtmlAttribute(session.token)}">`,
+      `<meta name="opencodex-session-csrf" content="${escapeHtmlAttribute(session.csrfToken)}">`,
+      `<meta name="opencodex-session-origin" content="${escapeHtmlAttribute(session.origin)}">`,
     ].join("");
     html = html.includes("</head>") ? html.replace("</head>", `${bootstrap}</head>`) : `${bootstrap}${html}`;
   }

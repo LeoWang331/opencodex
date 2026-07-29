@@ -1,8 +1,14 @@
 import {
+  closeSync,
   existsSync,
+  fstatSync,
+  fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -11,7 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const CONFIG_OWNER_FILE = ".opencodex-owner.json";
 export const CONFIG_UNINSTALL_MANIFEST = ".opencodex-uninstall.json";
@@ -34,8 +40,17 @@ type ConfigUninstallManifest = ConfigOwner & {
 
 const METADATA_MAX_BYTES = 64 * 1024;
 const MANIFEST_MAX_PATHS = 1024;
+const OWNERSHIP_LOCK_FILE = ".opencodex-owner.lock";
+const OWNERSHIP_RECOVERY_LOCK_FILE = ".opencodex-owner-recovery.lock";
+const OWNERSHIP_RECOVERY_CLAIM_PREFIX = `${OWNERSHIP_RECOVERY_LOCK_FILE}.claim-`;
+const OWNERSHIP_LOCK_PUBLISH_TEMP_PREFIX = ".opencodex-owner-lock-publish-";
+const OWNERSHIP_LOCK_TIMEOUT_MS = 5_000;
+const OWNERSHIP_LOCK_STALE_MS = 30_000;
+const OWNERSHIP_LOCK_RETRY_MS = 10;
+const OWNERSHIP_LOCK_MAX_BYTES = 256;
 const INITIAL_OWNED_PATHS = [
   ".star-prompted",
+  "admin-api-token",
   "artifacts",
   "auth.json",
   "auth.store.lock",
@@ -60,6 +75,7 @@ const INITIAL_OWNED_PATHS = [
   "opencodex-tray.ps1",
   "responses-state.json",
   "runtime-port.json",
+  "service-admin-token",
   "service-api-token",
   "service-state.json",
   "service.log",
@@ -72,15 +88,7 @@ const INITIAL_OWNED_PATHS = [
   "version.json",
   "winsw",
 ] as const;
-const ownershipCache = new Map<string, {
-  owner: ConfigOwner;
-  manifest: ConfigUninstallManifest;
-} | null>();
-
-function ownershipCacheKey(configDir: string): string {
-  const key = resolve(configDir);
-  return process.platform === "win32" ? key.toLowerCase() : key;
-}
+const ownershipLockWait = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 
 function samePath(left: string, right: string): boolean {
   return process.platform === "win32"
@@ -141,7 +149,11 @@ function manifestRelativePath(configDir: string, candidatePath: string): string 
   if (normalized.split("/").some(part => !part || part === "." || part === ".." || part.includes("\\"))) {
     return null;
   }
-  if (normalized === CONFIG_OWNER_FILE || normalized === CONFIG_UNINSTALL_MANIFEST) return null;
+  if (
+    normalized === CONFIG_OWNER_FILE
+    || normalized === CONFIG_UNINSTALL_MANIFEST
+    || isOwnershipLockPublishTempName(normalized)
+  ) return null;
   return normalized;
 }
 
@@ -168,7 +180,10 @@ function loadOwnership(configDir: string): { owner: ConfigOwner; manifest: Confi
 
 function createOwnership(configDir: string): { owner: ConfigOwner; manifest: ConfigUninstallManifest } | null {
   const rootStat = lstatSync(configDir);
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || readdirSync(configDir).length !== 0) return null;
+  const existingEntries = readdirSync(configDir).filter(
+    name => name !== OWNERSHIP_LOCK_FILE && !isOwnershipLockPublishTempName(name),
+  );
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || existingEntries.length !== 0) return null;
   const owner: ConfigOwner = {
     version: 1,
     ownerId: randomUUID(),
@@ -193,6 +208,342 @@ function createOwnership(configDir: string): { owner: ConfigOwner; manifest: Con
   return { owner, manifest };
 }
 
+function errorCode(error: unknown): string | undefined {
+  return error && typeof error === "object" && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+}
+
+type OwnershipLockSnapshot = {
+  token: string;
+  ownerPid: number;
+  mtimeMs: number;
+};
+
+function ownershipLockSnapshot(lockPath: string): OwnershipLockSnapshot | null {
+  try {
+    const metadata = lstatSync(lockPath);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > OWNERSHIP_LOCK_MAX_BYTES) {
+      return null;
+    }
+    const token = readFileSync(lockPath, "utf8");
+    const match = /^([1-9]\d*):[0-9a-f-]+\n$/i.exec(token);
+    if (!match) return null;
+    const ownerPid = Number(match[1]);
+    return Number.isSafeInteger(ownerPid)
+      ? { token, ownerPid, mtimeMs: metadata.mtimeMs }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isOwnershipLockPublishTempName(name: string): boolean {
+  if (!name.startsWith(OWNERSHIP_LOCK_PUBLISH_TEMP_PREFIX)) return false;
+  return /^[1-9]\d*-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/i.test(
+    name.slice(OWNERSHIP_LOCK_PUBLISH_TEMP_PREFIX.length),
+  );
+}
+
+type OwnershipLockFileIdentity = {
+  device: number;
+  inode: number;
+  size: number;
+};
+
+function lockFileIdentity(metadata: { dev: number; ino: number; size: number }): OwnershipLockFileIdentity {
+  return {
+    device: metadata.dev,
+    inode: metadata.ino,
+    size: metadata.size,
+  };
+}
+
+function isSameLockFile(
+  metadata: { dev: number; ino: number },
+  identity: OwnershipLockFileIdentity,
+): boolean {
+  return metadata.dev === identity.device && metadata.ino === identity.inode;
+}
+
+function readExpectedLockToken(descriptor: number, identity: OwnershipLockFileIdentity, token: string): boolean {
+  const expectedBytes = Buffer.from(token, "utf8");
+  if (identity.size !== expectedBytes.byteLength) return false;
+  const actualBytes = Buffer.alloc(identity.size);
+  let offset = 0;
+  while (offset < actualBytes.byteLength) {
+    const bytesRead = readSync(
+      descriptor,
+      actualBytes,
+      offset,
+      actualBytes.byteLength - offset,
+      offset,
+    );
+    if (bytesRead === 0) return false;
+    offset += bytesRead;
+  }
+  return actualBytes.equals(expectedBytes);
+}
+
+function unlinkPublishTempIfOwned(path: string, identity: OwnershipLockFileIdentity): void {
+  try {
+    const current = lstatSync(path);
+    if (current.isFile() && !current.isSymbolicLink() && isSameLockFile(current, identity)) {
+      unlinkSync(path);
+    }
+  } catch {
+    // Missing or replaced paths are never removed on behalf of this publisher.
+  }
+}
+
+function publishOwnershipLock(configDir: string, lockPath: string, token: string): boolean {
+  const tempPath = join(
+    configDir,
+    `${OWNERSHIP_LOCK_PUBLISH_TEMP_PREFIX}${process.pid}-${randomUUID()}.tmp`,
+  );
+  let descriptor: number | undefined;
+  let identity: OwnershipLockFileIdentity | undefined;
+  try {
+    descriptor = openSync(tempPath, "wx+", 0o600);
+    writeFileSync(descriptor, token, { encoding: "utf8" });
+    fsyncSync(descriptor);
+    const prepared = fstatSync(descriptor);
+    identity = lockFileIdentity(prepared);
+    if (
+      !prepared.isFile()
+      || prepared.isSymbolicLink()
+      || !readExpectedLockToken(descriptor, identity, token)
+    ) {
+      throw new Error("ownership lock temporary file was not written completely");
+    }
+    try {
+      linkSync(tempPath, lockPath);
+    } catch (error) {
+      if (errorCode(error) === "EEXIST") return false;
+      throw error;
+    }
+
+    const publishedPath = lstatSync(lockPath);
+    if (
+      !publishedPath.isFile()
+      || publishedPath.isSymbolicLink()
+      || !isSameLockFile(publishedPath, identity)
+      || publishedPath.size !== identity.size
+    ) {
+      throw new Error("ownership lock publication identity mismatch");
+    }
+    const publishedDescriptor = openSync(lockPath, "r");
+    try {
+      const published = fstatSync(publishedDescriptor);
+      if (
+        !published.isFile()
+        || published.isSymbolicLink()
+        || !isSameLockFile(published, identity)
+        || published.size !== identity.size
+        || !readExpectedLockToken(publishedDescriptor, identity, token)
+      ) {
+        throw new Error("ownership lock publication token mismatch");
+      }
+      const verifiedPath = lstatSync(lockPath);
+      if (
+        !verifiedPath.isFile()
+        || verifiedPath.isSymbolicLink()
+        || !isSameLockFile(verifiedPath, identity)
+        || verifiedPath.size !== identity.size
+      ) {
+        throw new Error("ownership lock publication changed during verification");
+      }
+      const linearized = fstatSync(publishedDescriptor);
+      if (
+        !linearized.isFile()
+        || linearized.isSymbolicLink()
+        || !isSameLockFile(linearized, identity)
+        || linearized.size !== identity.size
+        || !readExpectedLockToken(publishedDescriptor, identity, token)
+      ) {
+        throw new Error("ownership lock publication changed at final verification");
+      }
+      return true;
+    } finally {
+      closeSync(publishedDescriptor);
+    }
+  } finally {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* failure remains fail-closed before publication */ }
+    }
+    if (identity) unlinkPublishTempIfOwned(tempPath, identity);
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return errorCode(error) === "EPERM";
+  }
+}
+
+function releaseOwnedLock(lockPath: string, token: string): void {
+  try {
+    if (ownershipLockSnapshot(lockPath)?.token === token) unlinkSync(lockPath);
+  } catch {
+    // A missing or replaced lock must not be removed on behalf of another process.
+  }
+}
+
+function staleDeadLock(snapshot: OwnershipLockSnapshot): boolean {
+  return Date.now() - snapshot.mtimeMs > OWNERSHIP_LOCK_STALE_MS
+    && !isProcessAlive(snapshot.ownerPid);
+}
+
+function recoveryClaimPaths(configDir: string): string[] {
+  return readdirSync(configDir)
+    .filter(name => name.startsWith(OWNERSHIP_RECOVERY_CLAIM_PREFIX))
+    .map(name => join(configDir, name));
+}
+
+function recoveryClaimsAreClear(configDir: string): boolean {
+  for (const claimPath of recoveryClaimPaths(configDir)) {
+    const observed = ownershipLockSnapshot(claimPath);
+    if (!observed || !staleDeadLock(observed)) return false;
+    const current = ownershipLockSnapshot(claimPath);
+    if (!current || current.token !== observed.token || !staleDeadLock(current)) return false;
+    try {
+      unlinkSync(claimPath);
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") return false;
+    }
+  }
+  return true;
+}
+
+function moveStaleRecoveryLockToClaim(configDir: string, recoveryPath: string): boolean {
+  const observed = ownershipLockSnapshot(recoveryPath);
+  if (!observed || !staleDeadLock(observed)) return false;
+  const claimPath = join(
+    configDir,
+    `${OWNERSHIP_RECOVERY_CLAIM_PREFIX}${process.pid}-${randomUUID()}`,
+  );
+  try {
+    renameSync(recoveryPath, claimPath);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return true;
+    return false;
+  }
+
+  const claimed = ownershipLockSnapshot(claimPath);
+  if (!claimed || claimed.token !== observed.token || !staleDeadLock(claimed)) {
+    // A successor moved during the race remains an active claim until its owner releases it.
+    return false;
+  }
+  const current = ownershipLockSnapshot(claimPath);
+  if (!current || current.token !== claimed.token || !staleDeadLock(current)) return false;
+  try {
+    unlinkSync(claimPath);
+    return true;
+  } catch (error) {
+    return errorCode(error) === "ENOENT";
+  }
+}
+
+function releaseRecoveryLock(configDir: string, token: string): void {
+  const paths = [join(configDir, OWNERSHIP_RECOVERY_LOCK_FILE)];
+  try { paths.push(...recoveryClaimPaths(configDir)); } catch { /* fixed-path cleanup still applies */ }
+  for (const path of paths) {
+    try {
+      if (ownershipLockSnapshot(path)?.token === token) unlinkSync(path);
+    } catch {
+      // Missing or replaced recovery locks belong to another process.
+    }
+  }
+}
+
+function acquireRecoveryLock(configDir: string): { token: string } | null {
+  const recoveryPath = join(configDir, OWNERSHIP_RECOVERY_LOCK_FILE);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (!recoveryClaimsAreClear(configDir)) return null;
+    const token = `${process.pid}:${randomUUID()}\n`;
+    if (!publishOwnershipLock(configDir, recoveryPath, token)) {
+      if (!moveStaleRecoveryLockToClaim(configDir, recoveryPath)) return null;
+      continue;
+    }
+
+    try {
+      if (!recoveryClaimsAreClear(configDir)) {
+        releaseOwnedLock(recoveryPath, token);
+        return null;
+      }
+    } catch (error) {
+      releaseOwnedLock(recoveryPath, token);
+      throw error;
+    }
+    return { token };
+  }
+  return null;
+}
+
+function reclaimStaleOwnershipLock(
+  configDir: string,
+  lockPath: string,
+  observed: OwnershipLockSnapshot,
+): boolean {
+  const recoveryLock = acquireRecoveryLock(configDir);
+  if (!recoveryLock) return false;
+
+  try {
+    const current = ownershipLockSnapshot(lockPath);
+    if (
+      !current
+      || current.token !== observed.token
+      || Date.now() - current.mtimeMs <= OWNERSHIP_LOCK_STALE_MS
+      || isProcessAlive(current.ownerPid)
+    ) {
+      return false;
+    }
+    unlinkSync(lockPath);
+    return true;
+  } finally {
+    releaseRecoveryLock(configDir, recoveryLock.token);
+  }
+}
+
+function withOwnershipLock<T>(configDir: string, action: () => T): T {
+  const lockPath = join(configDir, OWNERSHIP_LOCK_FILE);
+  const token = `${process.pid}:${randomUUID()}\n`;
+  const deadline = Date.now() + OWNERSHIP_LOCK_TIMEOUT_MS;
+  let acquired = false;
+
+  while (!acquired) {
+    if (!publishOwnershipLock(configDir, lockPath, token)) {
+      try {
+        const observed = ownershipLockSnapshot(lockPath);
+        if (
+          observed
+          && Date.now() - observed.mtimeMs > OWNERSHIP_LOCK_STALE_MS
+          && !isProcessAlive(observed.ownerPid)
+          && reclaimStaleOwnershipLock(configDir, lockPath, observed)
+        ) {
+          continue;
+        }
+      } catch (staleError) {
+        if (errorCode(staleError) === "ENOENT") continue;
+      }
+      if (Date.now() >= deadline) throw new Error("timed out waiting for config ownership lock");
+      Atomics.wait(ownershipLockWait, 0, 0, OWNERSHIP_LOCK_RETRY_MS);
+      continue;
+    }
+    acquired = true;
+  }
+
+  try {
+    return action();
+  } finally {
+    releaseOwnedLock(lockPath, token);
+  }
+}
+
 function writeManifest(configDir: string, manifest: ConfigUninstallManifest): void {
   const path = join(configDir, CONFIG_UNINSTALL_MANIFEST);
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -206,6 +557,10 @@ function writeManifest(configDir: string, manifest: ConfigUninstallManifest): vo
 }
 
 function removeOwnedEntry(root: string, path: string): void {
+  const realParent = realpathSync.native(dirname(path));
+  if (!isWithinRoot(root, realParent)) {
+    throw new Error(`owned path parent resolves outside the config root: ${path}`);
+  }
   const entry = lstatSync(path);
   if (entry.isSymbolicLink()) {
     unlinkSync(path);
@@ -229,38 +584,34 @@ function removeOwnedEntry(root: string, path: string): void {
 export function recordOwnedConfigPath(configDir: string, candidatePath: string): boolean {
   const rel = manifestRelativePath(configDir, candidatePath);
   if (!rel) return false;
-  const cacheKey = ownershipCacheKey(configDir);
-  if (!existsSync(configDir)) {
-    ownershipCache.delete(cacheKey);
-    mkdirSync(configDir, { recursive: true, mode: 0o700 });
+  try {
+    let mayCreateOwnership: boolean;
+    if (!existsSync(configDir)) {
+      mkdirSync(configDir, { recursive: true, mode: 0o700 });
+      mayCreateOwnership = true;
+    } else {
+      mayCreateOwnership = readdirSync(configDir)
+        .every(name => name === OWNERSHIP_LOCK_FILE || isOwnershipLockPublishTempName(name));
+    }
+    return withOwnershipLock(configDir, () => {
+      const ownership = loadOwnership(configDir)
+        ?? (mayCreateOwnership ? createOwnership(configDir) : null);
+      if (!ownership) return false;
+      if (ownership.manifest.paths.includes(rel)) return true;
+      if (ownership.manifest.paths.length >= MANIFEST_MAX_PATHS) return false;
+      const manifest = {
+        ...ownership.manifest,
+        paths: [...ownership.manifest.paths, rel].sort(),
+      };
+      writeManifest(configDir, manifest);
+      return true;
+    });
+  } catch {
+    return false;
   }
-  let ownership = ownershipCache.get(cacheKey);
-  if (ownership === undefined) {
-    ownership = loadOwnership(configDir) ?? createOwnership(configDir);
-    ownershipCache.set(cacheKey, ownership);
-  }
-  if (!ownership) return false;
-  if (ownership.manifest.paths.includes(rel)) return true;
-  const manifest = {
-    ...ownership.manifest,
-    paths: [...ownership.manifest.paths, rel].sort(),
-  };
-  writeManifest(configDir, manifest);
-  ownershipCache.set(cacheKey, { owner: ownership.owner, manifest });
-  return true;
 }
 
-export function removeOwnedConfigState(configDir: string): ConfigRemovalResult {
-  ownershipCache.delete(ownershipCacheKey(configDir));
-  if (!existsSync(configDir)) return { status: "absent", residualPaths: [] };
-  const root = lstatSync(configDir);
-  if (!root.isDirectory() || root.isSymbolicLink()) {
-    return {
-      status: "refused",
-      reason: "config ownership root is not a real directory",
-      residualPaths: [configDir],
-    };
-  }
+function removeOwnedConfigStateLocked(configDir: string): ConfigRemovalResult {
   const ownership = loadOwnership(configDir);
   if (!ownership) {
     return {
@@ -269,6 +620,15 @@ export function removeOwnedConfigState(configDir: string): ConfigRemovalResult {
       residualPaths: [configDir],
     };
   }
+  const recoveryLock = acquireRecoveryLock(configDir);
+  if (!recoveryLock) {
+    return {
+      status: "refused",
+      reason: "config ownership recovery lock is active or invalid",
+      residualPaths: [configDir],
+    };
+  }
+  releaseRecoveryLock(configDir, recoveryLock.token);
 
   for (const rel of ownership.manifest.paths) {
     const path = manifestRelativePath(configDir, join(configDir, ...rel.split("/")));
@@ -306,7 +666,9 @@ export function removeOwnedConfigState(configDir: string): ConfigRemovalResult {
       residualPaths: readdirSync(configDir).map(name => join(configDir, name)),
     };
   }
-  const residualPaths = readdirSync(configDir).map(name => join(configDir, name));
+  const residualPaths = readdirSync(configDir)
+    .filter(name => name !== OWNERSHIP_LOCK_FILE)
+    .map(name => join(configDir, name));
   if (residualPaths.length > 0) {
     return {
       status: "partial",
@@ -314,6 +676,32 @@ export function removeOwnedConfigState(configDir: string): ConfigRemovalResult {
       residualPaths,
     };
   }
+  return { status: "removed", residualPaths: [] };
+}
+
+export function removeOwnedConfigState(configDir: string): ConfigRemovalResult {
+  if (!existsSync(configDir)) return { status: "absent", residualPaths: [] };
+  const root = lstatSync(configDir);
+  if (!root.isDirectory() || root.isSymbolicLink()) {
+    return {
+      status: "refused",
+      reason: "config ownership root is not a real directory",
+      residualPaths: [configDir],
+    };
+  }
+
+  let result: ConfigRemovalResult;
+  try {
+    result = withOwnershipLock(configDir, () => removeOwnedConfigStateLocked(configDir));
+  } catch (error) {
+    return {
+      status: "refused",
+      reason: `could not acquire config ownership lock: ${error instanceof Error ? error.message : String(error)}`,
+      residualPaths: [configDir],
+    };
+  }
+  if (result.status !== "removed") return result;
+
   try {
     rmdirSync(configDir);
   } catch (error) {

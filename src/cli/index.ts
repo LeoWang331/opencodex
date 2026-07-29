@@ -27,7 +27,7 @@ import { hasHelpFlag, printSubcommandUsage, printUsage, printVersion } from "./h
 import { findAvailablePort, isAddrInUse, PortUnavailableError, shouldPersistSelectedPort, waitForPortAvailable } from "../server/ports";
 import { findLiveProxy, probeHostname, type LiveProxy } from "../server/proxy-liveness";
 import { stopProxy } from "../lib/process-control";
-import { loadServiceTokenFromFile } from "../lib/service-secrets";
+import { loadServiceTokensIntoEnv } from "../lib/service-secrets";
 import { diagnoseService, isServiceOwnershipError, serviceCommand, serviceEnvironmentOwnedHere, serviceStartableFromTray, serviceStatusSummary, stopServiceIfInstalled, uninstallServiceIfInstalled } from "../service";
 import { startupHealthSummary } from "../codex/autostart-health";
 import { drainAndShutdown, isRecyclingForExit, startServer } from "../server";
@@ -160,11 +160,9 @@ async function chooseListenPort(requestedPort?: number): Promise<number> {
 }
 
 async function handleStart(options: { block?: boolean } = {}) {
-  // Native (WinSW) service mode has no batch wrapper to read the service token file
-  // into the environment, so the app loads it here before the server binds. The server
-  // auth path reads OPENCODEX_API_AUTH_TOKEN from the environment.
-  const serviceToken = loadServiceTokenFromFile(process.env);
-  if (serviceToken) process.env.OPENCODEX_API_AUTH_TOKEN = serviceToken;
+  // Load only the service data token into the environment. Management auth reads its
+  // protected file directly so child processes cannot inherit that credential.
+  loadServiceTokensIntoEnv(process.env);
   const requestedPort = parsePortOption();
   if (!currentExternalCodexModelProvider()) reconcileJournal();
   const existingPid = readPid();

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { saveConfig } from "../src/config";
+import { getConfigDir, saveConfig } from "../src/config";
 import { windowsEnvIndirectBatchValue } from "../src/lib/win-paths";
 import { assertServiceAuthEnvironment, assertServiceEnvironmentMatchesInstall, bakedServicePathsDiagnostic, buildPlist, buildUnit, buildWindowsLauncherVbs, buildWindowsSchtasksCreateArgs, buildWindowsServiceScript, buildWindowsTaskXml, deriveWindowsServiceDiagnostic, normalizeServiceSubcommand, parseServiceInstallState, readWindowsSchedulerXmlState, resolveServiceListenPort, serviceLogPath, serviceStartableFromTray, serviceStatusSummary, windowsTaskRegistrationHealthy } from "../src/service";
 import { serviceApiTokenFilePath } from "../src/lib/service-secrets";
@@ -114,7 +114,9 @@ describe("systemd service unit", () => {
       process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
       const unit = buildUnit();
       expect(unit).toContain('Environment="CODEX_HOME=/tmp/codex-home"');
-      expect(unit).toContain('Environment="OPENCODEX_HOME=/tmp/opencodex-home"');
+      expect(unit).toContain(
+        `Environment="OPENCODEX_HOME=${getConfigDir().replace(/\\/g, "\\\\")}"`,
+      );
       expectTextToContainPath(unit, serviceApiTokenFilePath());
       expect(unit).not.toContain("local-secret");
       expect(unit).not.toContain("Environment=\"OPENCODEX_API_AUTH_TOKEN=");
@@ -141,7 +143,7 @@ describe("systemd service unit", () => {
     expect(startSystemd).toContain("ocx service install");
     expect(startSystemd).toContain("process.exit(1)");
 
-    const writeAt = installSystemd.indexOf('writeFileSync(unitPath(), buildUnit(), "utf8")');
+    const writeAt = installSystemd.indexOf('writeFileSync(unitPath(), buildUnit(state), "utf8")');
     const reloadAt = installSystemd.indexOf("systemctl --user daemon-reload");
     const enableAt = installSystemd.indexOf("systemctl --user enable");
     const restartAt = installSystemd.indexOf("systemctl --user restart");
@@ -180,6 +182,27 @@ describe("service install auth preflight", () => {
       hostname: "0.0.0.0",
       providers: { openai: { adapter: "openai-chat", baseUrl: "https://api.example.test/v1" } },
       defaultProvider: "openai",
+    } as OcxConfig);
+
+    expect(() => assertServiceAuthEnvironment()).not.toThrow();
+  });
+
+  test("allows non-loopback service install when config has a data-plane key", () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    delete process.env.OPENCODEX_API_AUTH_TOKEN;
+    saveConfig({
+      port: 10100,
+      hostname: "0.0.0.0",
+      providers: { openai: { adapter: "openai-chat", baseUrl: "https://api.example.test/v1" } },
+      defaultProvider: "openai",
+      apiKeys: [{
+        id: "configured",
+        name: "Configured data key",
+        key: "ocx_data_configured-secret",
+        createdAt: "2026-07-29T00:00:00.000Z",
+      }],
     } as OcxConfig);
 
     expect(() => assertServiceAuthEnvironment()).not.toThrow();
@@ -455,18 +478,23 @@ describe("Windows service task", () => {
     const oldPath = process.env.PATH;
     const oldOpenCodexHome = process.env.OPENCODEX_HOME;
     const oldApiAuthToken = process.env.OPENCODEX_API_AUTH_TOKEN;
+    const oldAdminAuthToken = process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
     try {
       process.env.PATH = 'C:\\safe" & echo PWNED & rem "';
       process.env.OPENCODEX_HOME = 'C:\\ocx" & del C:\\important & rem "';
       process.env.OPENCODEX_API_AUTH_TOKEN = 'token" & echo LEAK & rem "';
+      process.env.OPENCODEX_ADMIN_AUTH_TOKEN = 'admin" & echo ADMIN_LEAK & rem "';
       const script = buildWindowsServiceScript();
       expect(script).toContain('set "PATH=C:\\safe & echo PWNED & rem "');
       expect(script).toContain('set "OPENCODEX_HOME=C:\\ocx & del C:\\important & rem "');
       expect(script).toContain('set "OCX_API_TOKEN_FILE=');
       expect(script).toContain('set /p OPENCODEX_API_AUTH_TOKEN=<"%OCX_API_TOKEN_FILE%"');
+      expect(script).not.toContain('set "OCX_ADMIN_TOKEN_FILE=');
+      expect(script).not.toContain('set /p OPENCODEX_ADMIN_AUTH_TOKEN=<"%OCX_ADMIN_TOKEN_FILE%"');
       expect(script).not.toContain('set "PATH=C:\\safe" & echo PWNED');
       expect(script).not.toContain('set "OPENCODEX_HOME=C:\\ocx" & del');
       expect(script).not.toContain("token & echo LEAK");
+      expect(script).not.toContain("ADMIN_LEAK");
     } finally {
       if (oldPath === undefined) delete process.env.PATH;
       else process.env.PATH = oldPath;
@@ -474,6 +502,8 @@ describe("Windows service task", () => {
       else process.env.OPENCODEX_HOME = oldOpenCodexHome;
       if (oldApiAuthToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
       else process.env.OPENCODEX_API_AUTH_TOKEN = oldApiAuthToken;
+      if (oldAdminAuthToken === undefined) delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+      else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = oldAdminAuthToken;
     }
   });
 
@@ -568,7 +598,7 @@ describe("launchd service plist", () => {
       process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
       const plist = buildPlist();
       expect(plist).toContain("<key>CODEX_HOME</key><string>/tmp/codex-home</string>");
-      expect(plist).toContain("<key>OPENCODEX_HOME</key><string>/tmp/opencodex-home</string>");
+      expect(plist).toContain(`<key>OPENCODEX_HOME</key><string>${getConfigDir()}</string>`);
       expectTextToContainPath(plist, serviceApiTokenFilePath());
       expect(plist).not.toContain("local-secret");
       expect(plist).not.toContain("<key>OPENCODEX_API_AUTH_TOKEN</key>");
@@ -613,8 +643,8 @@ describe("service lifecycle cleanup ordering", () => {
     const installWindows = service.slice(service.indexOf("function installWindows()"), service.indexOf("function startWindows()"));
 
     const stopAt = installWindows.indexOf("stopWindows();");
-    const scriptWriteAt = installWindows.indexOf("writeServiceAssetWithRetry(script");
-    const xmlWriteAt = installWindows.indexOf("writeServiceAssetWithRetry(windowsTaskXmlPath()");
+    const scriptWriteAt = installWindows.search(/writeServiceAssetWithRetry\(\s*script,/);
+    const xmlWriteAt = installWindows.search(/writeServiceAssetWithRetry\(windowsTaskXmlPath\(\)/);
     expect(stopAt).toBeGreaterThan(-1);
     expect(scriptWriteAt).toBeGreaterThan(-1);
     expect(xmlWriteAt).toBeGreaterThan(-1);

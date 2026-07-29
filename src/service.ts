@@ -6,7 +6,7 @@
  * restore it via the command.
  */
 import { execFileSync, execSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { expandUserPath, getConfigDir, readPid, removePid, removeRuntimePort } from "./config";
@@ -16,7 +16,8 @@ import { stripGrokConfig } from "./grok/inject";
 import { isWslRuntime } from "./codex/home";
 import { durableBunPath, durableBunRuntime } from "./lib/bun-runtime";
 import { isProcessAlive, stopProxy } from "./lib/process-control";
-import { serviceApiTokenFilePath } from "./lib/service-secrets";
+import { removeServiceTokenFiles, serviceApiTokenFilePath } from "./lib/service-secrets";
+import { serviceAdminTokenFilePath } from "./lib/admin-secrets";
 import { randomUUID } from "node:crypto";
 import {
   ELEVATION_REQUEST_TIMEOUT_MS,
@@ -34,7 +35,12 @@ import {
 import { defaultWinswEntry, installWinswService, startWinswService, stopWinswService, statusWinswRaw, uninstallWinswService, winswStatusSummary, WINSW_SERVICE_ID, WINSW_SHA256, WINSW_VERSION } from "./lib/winsw";
 import { hardenSecretDir, hardenSecretPath } from "./lib/windows-secret-acl";
 import { windowsEnvIndirectBatchPathList, windowsEnvIndirectBatchValue } from "./lib/win-paths";
-import { recordOwnedConfigPath } from "./lib/config-ownership";
+import {
+  CONFIG_OWNER_FILE,
+  CONFIG_UNINSTALL_MANIFEST,
+  recordOwnedConfigPath,
+} from "./lib/config-ownership";
+import { assertServerAuthConfig } from "./server/auth-cors";
 
 const LABEL = "com.opencodex.proxy";
 const TASK = "opencodex-proxy";
@@ -236,48 +242,474 @@ function plistString(value: string): string {
     .replace(/'/g, "&apos;");
 }
 
-function isLoopbackHostname(hostname: string | undefined): boolean {
-  const normalized = (hostname ?? "127.0.0.1").trim().toLowerCase();
-  return normalized === "" || normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1" || normalized === "[::1]";
-}
-
 export function assertServiceAuthEnvironment(): void {
-  const config = loadConfig();
-  if (isLoopbackHostname(config.hostname)) return;
-  if (process.env.OPENCODEX_API_AUTH_TOKEN?.trim()) return;
-  throw new Error(
-    "OPENCODEX_API_AUTH_TOKEN is required before installing a service for non-loopback hostname. " +
-      "Set it in the same shell, then rerun `ocx service install`.",
-  );
+  assertServerAuthConfig(loadConfig());
 }
 
-function writeServiceApiTokenFile(): string | null {
-  const token = process.env.OPENCODEX_API_AUTH_TOKEN?.trim();
-  if (!token) return null;
-  const path = serviceApiTokenFilePath();
-  const dir = getConfigDir();
-  recordOwnedConfigPath(dir, path);
+export interface ServiceApiTokenWriteOptions {
+  configDir?: string;
+  env?: Record<string, string | undefined>;
+  platform?: string;
+  recordOwnedPath?: typeof recordOwnedConfigPath;
+  hardenDir?: typeof hardenSecretDir;
+  hardenPath?: typeof hardenSecretPath;
+}
+
+interface ValidatedServiceApiToken {
+  payload: string;
+}
+
+function validatedServiceApiToken(
+  env: Record<string, string | undefined>,
+): ValidatedServiceApiToken | null {
+  const rawToken = env.OPENCODEX_API_AUTH_TOKEN;
+  if (rawToken === undefined) return null;
+  if (/[\x00-\x1f\x7f]/.test(rawToken)) {
+    throw new Error(
+      "OPENCODEX_API_AUTH_TOKEN cannot contain CR, LF, or NUL, or other ASCII control characters when installing a service",
+    );
+  }
+  const token = rawToken.trim();
+  if (!token) {
+    if (rawToken.length > 0) {
+      throw new Error("OPENCODEX_API_AUTH_TOKEN cannot be whitespace-only when installing a service");
+    }
+    return null;
+  }
+  return { payload: `${token}\n` };
+}
+
+function writePlannedServiceApiTokenFile(
+  plannedToken: ValidatedServiceApiToken | null,
+  options: ServiceApiTokenWriteOptions,
+): string | null {
+  const dir = options.configDir ?? getConfigDir();
+  const path = serviceApiTokenFilePath(dir);
+  if (!plannedToken) {
+    try {
+      unlinkSync(path);
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error
+        ? String((error as NodeJS.ErrnoException).code)
+        : "";
+      if (code !== "ENOENT") {
+        throw new Error("stale data service token could not be removed; service install aborted", { cause: error });
+      }
+    }
+    return null;
+  }
+  (options.recordOwnedPath ?? recordOwnedConfigPath)(dir, path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (process.platform === "win32") hardenSecretDir(dir, { required: true });
-  writeFileSync(path, `${token}\n`, { encoding: "utf8", mode: 0o600 });
-  try { chmodSync(path, 0o600); } catch { /* best-effort */ }
-  if (process.platform === "win32") hardenSecretPath(path, { required: true });
+  if ((options.platform ?? process.platform) === "win32") {
+    const hardened = (options.hardenDir ?? hardenSecretDir)(dir, { required: true });
+    if (!hardened.ok) throw new Error("data service token directory ACL hardening did not complete");
+  }
+  const tempPath = `${path}.tmp.${process.pid}.${randomUUID()}`;
+  try {
+    writeFileSync(tempPath, plannedToken.payload, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    try { chmodSync(tempPath, 0o600); } catch { /* best-effort on platforms that ignore chmod */ }
+    if ((options.platform ?? process.platform) === "win32") {
+      const hardened = (options.hardenPath ?? hardenSecretPath)(tempPath, { required: true });
+      if (!hardened.ok) throw new Error("data service token file ACL hardening did not complete");
+    }
+    renameSync(tempPath, path);
+  } catch (error) {
+    try {
+      if (existsSync(tempPath)) unlinkSync(tempPath);
+    } catch (cleanupError) {
+      throw new Error(
+        "data service token write failed and its temporary file could not be removed",
+        { cause: cleanupError },
+      );
+    }
+    throw error;
+  }
   return path;
 }
 
-export function buildPlist(): string {
+export function writeServiceApiTokenFile(options: ServiceApiTokenWriteOptions = {}): string | null {
+  return writePlannedServiceApiTokenFile(
+    validatedServiceApiToken(options.env ?? process.env),
+    options,
+  );
+}
+
+export interface ServiceAdminTokenWriteOptions {
+  configDir?: string;
+  env?: Record<string, string | undefined>;
+  platform?: string;
+  recordOwnedPath?: typeof recordOwnedConfigPath;
+  hardenDir?: typeof hardenSecretDir;
+  hardenPath?: typeof hardenSecretPath;
+}
+
+function validatedServiceAdminToken(
+  env: Record<string, string | undefined>,
+): { token: string; payload: string } | null {
+  const token = env.OPENCODEX_ADMIN_AUTH_TOKEN?.trim();
+  if (!token) return null;
+  if (/[\r\n\0]/.test(token)) {
+    throw new Error("OPENCODEX_ADMIN_AUTH_TOKEN cannot contain line breaks or NUL when installing a service");
+  }
+  const payload = `${token}\n`;
+  if (Buffer.byteLength(payload, "utf8") > 512) {
+    throw new Error("OPENCODEX_ADMIN_AUTH_TOKEN cannot exceed 512 UTF-8 bytes when installing a service");
+  }
+  return { token, payload };
+}
+
+function isLegacyUnownedConfigDir(dir: string): boolean {
+  if (!existsSync(dir)) return false;
+  if (
+    existsSync(join(dir, CONFIG_OWNER_FILE))
+    || existsSync(join(dir, CONFIG_UNINSTALL_MANIFEST))
+  ) return false;
+  try {
+    return readdirSync(dir).some(name => name !== ".opencodex-owner.lock");
+  } catch {
+    return false;
+  }
+}
+
+export function writeServiceAdminTokenFile(options: ServiceAdminTokenWriteOptions = {}): string | null {
+  const env = options.env ?? process.env;
+  const plannedToken = validatedServiceAdminToken(env);
+  const dir = options.configDir ?? getConfigDir();
+  const path = serviceAdminTokenFilePath(dir);
+  if (!plannedToken) {
+    try {
+      unlinkSync(path);
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error
+        ? String((error as NodeJS.ErrnoException).code)
+        : "";
+      if (code !== "ENOENT") {
+        throw new Error(
+          "stale management service token could not be removed; service install aborted",
+          { cause: error },
+        );
+      }
+    }
+    return null;
+  }
+  const { payload } = plannedToken;
+  const recordOwnedPath = options.recordOwnedPath ?? recordOwnedConfigPath;
+  const legacyUnowned = isLegacyUnownedConfigDir(dir);
+  const recorded = recordOwnedPath(dir, path);
+  if (!recorded) {
+    const ownershipMetadataExists = existsSync(join(dir, CONFIG_OWNER_FILE))
+      || existsSync(join(dir, CONFIG_UNINSTALL_MANIFEST));
+    if (!legacyUnowned || ownershipMetadataExists) {
+      throw new Error("management service token could not be registered in the config ownership manifest");
+    }
+  }
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if ((options.platform ?? process.platform) === "win32") {
+    const hardened = (options.hardenDir ?? hardenSecretDir)(dir, { required: true });
+    if (!hardened.ok) throw new Error("management service token directory ACL hardening did not complete");
+  }
+  const tempPath = `${path}.tmp.${process.pid}.${randomUUID()}`;
+  try {
+    writeFileSync(tempPath, payload, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    try { chmodSync(tempPath, 0o600); } catch { /* best-effort on platforms that ignore chmod */ }
+    if ((options.platform ?? process.platform) === "win32") {
+      const hardened = (options.hardenPath ?? hardenSecretPath)(tempPath, { required: true });
+      if (!hardened.ok) throw new Error("management service token file ACL hardening did not complete");
+    }
+    renameSync(tempPath, path);
+  } catch (error) {
+    try {
+      if (existsSync(tempPath)) unlinkSync(tempPath);
+    } catch (cleanupError) {
+      throw new Error(
+        "management service token write failed and its temporary file could not be removed",
+        { cause: cleanupError },
+      );
+    }
+    throw error;
+  }
+  return path;
+}
+
+export interface ServiceTokenDefinitionState {
+  adminTokenFile: string | null;
+}
+
+export interface ServiceTokenInstallTransactionOptions
+  extends ServiceAdminTokenWriteOptions {
+  env?: Record<string, string | undefined>;
+}
+
+interface ServiceTokenFileSnapshot {
+  path: string;
+  contents: Buffer | null;
+}
+
+interface ServiceTokenInstallPlan {
+  dataToken: ValidatedServiceApiToken | null;
+  adminAction:
+    | { kind: "write"; token: string }
+    | { kind: "preserve" }
+    | { kind: "remove" };
+  definitionState: ServiceTokenDefinitionState;
+}
+
+function errorCode(error: unknown): string {
+  return error && typeof error === "object" && "code" in error
+    ? String((error as NodeJS.ErrnoException).code)
+    : "";
+}
+
+function normalizedPathEquals(left: string, right: string, platform: string): boolean {
+  const normalizedLeft = resolve(left);
+  const normalizedRight = resolve(right);
+  return platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+function snapshotServiceTokenFile(path: string): ServiceTokenFileSnapshot {
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(`service token snapshot refused a non-regular file at ${path}`);
+    }
+    return { path, contents: Buffer.from(readFileSync(path)) };
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return { path, contents: null };
+    throw error;
+  }
+}
+
+function validatedServiceTokenInstallValues(
+  env: Record<string, string | undefined>,
+  configDir: string,
+  platform: string,
+): {
+  dataToken: ValidatedServiceApiToken | null;
+  explicitAdmin: { token: string; payload: string } | null;
+  preserveAdminPointer: boolean;
+} {
+  const dataToken = validatedServiceApiToken(env);
+  const explicitAdmin = validatedServiceAdminToken(env);
+  const adminPointer = env.OCX_ADMIN_TOKEN_FILE?.trim();
+  if (explicitAdmin || !adminPointer) {
+    return { dataToken, explicitAdmin, preserveAdminPointer: false };
+  }
+  const expectedPath = serviceAdminTokenFilePath(configDir);
+  if (!normalizedPathEquals(adminPointer, expectedPath, platform)) {
+    throw new Error(
+      "OCX_ADMIN_TOKEN_FILE must resolve to the current service-admin-token before reinstalling the service",
+    );
+  }
+  return { dataToken, explicitAdmin: null, preserveAdminPointer: true };
+}
+
+function buildServiceTokenInstallPlan(
+  values: ReturnType<typeof validatedServiceTokenInstallValues>,
+  adminSnapshot: ServiceTokenFileSnapshot,
+): ServiceTokenInstallPlan {
+  if (values.explicitAdmin) {
+    return {
+      dataToken: values.dataToken,
+      adminAction: { kind: "write", token: values.explicitAdmin.token },
+      definitionState: { adminTokenFile: adminSnapshot.path },
+    };
+  }
+  if (!values.preserveAdminPointer) {
+    return {
+      dataToken: values.dataToken,
+      adminAction: { kind: "remove" },
+      definitionState: { adminTokenFile: null },
+    };
+  }
+  const contents = adminSnapshot.contents;
+  const token = contents?.toString("utf8").trim() ?? "";
+  if (
+    !contents
+    || contents.byteLength > 512
+    || !token
+    || /[\r\n\0]/.test(token)
+  ) {
+    throw new Error(
+      "OCX_ADMIN_TOKEN_FILE does not reference a valid current service-admin-token",
+    );
+  }
+  return {
+    dataToken: values.dataToken,
+    adminAction: { kind: "preserve" },
+    definitionState: { adminTokenFile: adminSnapshot.path },
+  };
+}
+
+function restoreServiceTokenSnapshot(
+  snapshot: ServiceTokenFileSnapshot,
+  label: string,
+  options: ServiceTokenInstallTransactionOptions,
+): void {
+  if (!snapshot.contents) {
+    try {
+      unlinkSync(snapshot.path);
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+    }
+    return;
+  }
+  const dir = dirname(snapshot.path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") {
+    const hardened = (options.hardenDir ?? hardenSecretDir)(dir, { required: true });
+    if (!hardened.ok) throw new Error(`${label} rollback directory ACL hardening did not complete`);
+  }
+  const tempPath = `${snapshot.path}.restore.${process.pid}.${randomUUID()}`;
+  try {
+    writeFileSync(tempPath, snapshot.contents, { flag: "wx", mode: 0o600 });
+    chmodSync(tempPath, 0o600);
+    if (platform === "win32") {
+      const hardened = (options.hardenPath ?? hardenSecretPath)(tempPath, { required: true });
+      if (!hardened.ok) throw new Error(`${label} rollback file ACL hardening did not complete`);
+    }
+    renameSync(tempPath, snapshot.path);
+  } catch (error) {
+    try {
+      unlinkSync(tempPath);
+    } catch (cleanupError) {
+      if (errorCode(cleanupError) !== "ENOENT") {
+        throw new Error(`${label} rollback failed and its temporary file could not be removed`, {
+          cause: cleanupError,
+        });
+      }
+    }
+    throw error;
+  }
+}
+
+function rollbackServiceTokenInstall(
+  snapshots: ServiceTokenFileSnapshot[],
+  options: ServiceTokenInstallTransactionOptions,
+  installError: unknown,
+): never {
+  const failures: string[] = [];
+  const labels = ["data service token", "management service token"];
+  for (let index = 0; index < snapshots.length; index++) {
+    try {
+      restoreServiceTokenSnapshot(snapshots[index]!, labels[index]!, options);
+    } catch (error) {
+      failures.push(`${labels[index]}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (failures.length > 0) {
+    const original = installError instanceof Error ? installError.message : String(installError);
+    throw new Error(
+      `${original}; service token rollback also failed (${failures.join("; ")})`,
+      { cause: installError },
+    );
+  }
+  throw installError;
+}
+
+function beginServiceTokenInstallTransaction(
+  options: ServiceTokenInstallTransactionOptions,
+): {
+  definitionState: ServiceTokenDefinitionState;
+  snapshots: ServiceTokenFileSnapshot[];
+} {
+  const env = options.env ?? process.env;
+  const configDir = options.configDir ?? getConfigDir();
+  const platform = options.platform ?? process.platform;
+  const values = validatedServiceTokenInstallValues(env, configDir, platform);
+  const snapshots = [
+    snapshotServiceTokenFile(serviceApiTokenFilePath(configDir)),
+    snapshotServiceTokenFile(serviceAdminTokenFilePath(configDir)),
+  ];
+  const plan = buildServiceTokenInstallPlan(values, snapshots[1]!);
+  if (plan.adminAction.kind === "preserve" && platform === "win32") {
+    const hardenedDir = (options.hardenDir ?? hardenSecretDir)(configDir, { required: true });
+    if (!hardenedDir.ok) {
+      throw new Error(
+        "preserved management service token directory ACL hardening did not complete",
+      );
+    }
+    const hardenedFile = (options.hardenPath ?? hardenSecretPath)(
+      plan.definitionState.adminTokenFile!,
+      { required: true },
+    );
+    if (!hardenedFile.ok) {
+      throw new Error(
+        "preserved management service token file ACL hardening did not complete",
+      );
+    }
+  }
+  try {
+    writePlannedServiceApiTokenFile(plan.dataToken, {
+      ...options,
+      configDir,
+      platform,
+    });
+    if (plan.adminAction.kind !== "preserve") {
+      writeServiceAdminTokenFile({
+        ...options,
+        configDir,
+        env: {
+          OPENCODEX_ADMIN_AUTH_TOKEN: plan.adminAction.kind === "write"
+            ? plan.adminAction.token
+            : undefined,
+        },
+        platform,
+      });
+    }
+  } catch (error) {
+    rollbackServiceTokenInstall(snapshots, options, error);
+  }
+  return { definitionState: plan.definitionState, snapshots };
+}
+
+export function withServiceTokenInstallTransaction<T>(
+  install: (state: ServiceTokenDefinitionState) => T,
+  options: ServiceTokenInstallTransactionOptions = {},
+): T {
+  const transaction = beginServiceTokenInstallTransaction(options);
+  try {
+    return install(transaction.definitionState);
+  } catch (error) {
+    rollbackServiceTokenInstall(transaction.snapshots, options, error);
+  }
+}
+
+export async function withServiceTokenInstallTransactionAsync<T>(
+  install: (state: ServiceTokenDefinitionState) => Promise<T>,
+  options: ServiceTokenInstallTransactionOptions = {},
+): Promise<T> {
+  const transaction = beginServiceTokenInstallTransaction(options);
+  try {
+    return await install(transaction.definitionState);
+  } catch (error) {
+    rollbackServiceTokenInstall(transaction.snapshots, options, error);
+  }
+}
+
+function serviceAdminTokenFileForDefinition(
+  state?: ServiceTokenDefinitionState,
+): string | null {
+  if (state) return state.adminTokenFile;
+  const path = serviceAdminTokenFilePath();
+  return existsSync(path) ? path : null;
+}
+
+export function buildPlist(state?: ServiceTokenDefinitionState): string {
   const { bun, cli } = cliEntry();
   const log = logPath();
   const path = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
   const codexHome = process.env.CODEX_HOME?.trim();
-  const opencodexHome = process.env.OPENCODEX_HOME?.trim();
+  const opencodexHome = process.env.OPENCODEX_HOME?.trim() ? getConfigDir() : undefined;
   const envLines = [
     `    <key>OCX_SERVICE</key><string>1</string>`,
     `    <key>PATH</key><string>${plistString(path)}</string>`,
     codexHome ? `    <key>CODEX_HOME</key><string>${plistString(codexHome)}</string>` : null,
     opencodexHome ? `    <key>OPENCODEX_HOME</key><string>${plistString(opencodexHome)}</string>` : null,
   ].filter((line): line is string => Boolean(line)).join("\n");
-  const command = buildServiceShellCommand(bun, cli);
+  const command = buildServiceShellCommand(bun, cli, resolveServiceListenPort(), state);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -326,9 +758,18 @@ export function resolveServiceListenPort(override?: number): number {
   return 10100;
 }
 
-function buildServiceShellCommand(bun: string, cli: string, port = resolveServiceListenPort()): string {
+function buildServiceShellCommand(
+  bun: string,
+  cli: string,
+  port = resolveServiceListenPort(),
+  state?: ServiceTokenDefinitionState,
+): string {
   const tokenFile = serviceApiTokenFilePath();
-  return `if [ -f ${shellQuote(tokenFile)} ]; then OPENCODEX_API_AUTH_TOKEN="$(cat ${shellQuote(tokenFile)})"; export OPENCODEX_API_AUTH_TOKEN; fi; exec ${shellQuote(bun)} ${shellQuote(cli)} start --port ${port}`;
+  const adminTokenFile = serviceAdminTokenFileForDefinition(state);
+  const adminTokenSetup = adminTokenFile
+    ? `OCX_ADMIN_TOKEN_FILE=${shellQuote(adminTokenFile)}; export OCX_ADMIN_TOKEN_FILE; `
+    : "";
+  return `${adminTokenSetup}if [ -f ${shellQuote(tokenFile)} ]; then OPENCODEX_API_AUTH_TOKEN="$(cat ${shellQuote(tokenFile)})"; export OPENCODEX_API_AUTH_TOKEN; fi; exec ${shellQuote(bun)} ${shellQuote(cli)} start --port ${port}`;
 }
 
 function systemdQuote(value: string): string {
@@ -895,10 +1336,15 @@ function taskXmlString(value: string): string {
     .replace(/'/g, "&apos;");
 }
 
-export function buildWindowsServiceScript(entry = cliEntry(), port = resolveServiceListenPort()): string {
+export function buildWindowsServiceScript(
+  entry = cliEntry(),
+  port = resolveServiceListenPort(),
+  state?: ServiceTokenDefinitionState,
+): string {
   const { bun, cli } = entry;
   const bunRuntime = durableBunRuntime();
   const path = process.env.PATH ?? "";
+  const adminTokenFile = serviceAdminTokenFileForDefinition(state);
   const lines = [
     "@echo off",
     "setlocal",
@@ -908,8 +1354,15 @@ export function buildWindowsServiceScript(entry = cliEntry(), port = resolveServ
     windowsBatchSet("OCX_SERVICE", "1"),
     windowsBatchSet("PATH", path, "pathList"),
     windowsBatchSet("CODEX_HOME", process.env.CODEX_HOME?.trim(), "path"),
-    windowsBatchSet("OPENCODEX_HOME", process.env.OPENCODEX_HOME?.trim(), "path"),
+    windowsBatchSet(
+      "OPENCODEX_HOME",
+      process.env.OPENCODEX_HOME?.trim() ? getConfigDir() : undefined,
+      "path",
+    ),
     windowsBatchSet("OCX_API_TOKEN_FILE", serviceApiTokenFilePath(), "path"),
+    adminTokenFile
+      ? windowsBatchSet("OCX_ADMIN_TOKEN_FILE", adminTokenFile, "path")
+      : "",
     windowsBatchSet("OCX_SERVICE_LOG", serviceLogPath(), "path"),
     windowsBatchSet("OCX_BUN", bun, "path"),
     windowsBatchSet("OCX_CLI", cli, "path"),
@@ -1153,16 +1606,17 @@ export function readWindowsSchedulerXmlState(
 
 // ── macOS (launchd) ──
 function installLaunchd(): void {
-  const dir = join(homedir(), "Library", "LaunchAgents");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  recordOwnedConfigPath(getConfigDir(), serviceStatePath());
-  if (!existsSync(getConfigDir())) mkdirSync(getConfigDir(), { recursive: true });
-  writeServiceApiTokenFile();
-  const p = plistPath();
-  writeFileSync(p, buildPlist(), "utf8");
-  try { sh(`launchctl unload "${p}" 2>/dev/null`); } catch { /* not loaded */ }
-  sh(`launchctl load -w "${p}"`);
-  writeServiceInstallState();
+  withServiceTokenInstallTransaction(state => {
+    const dir = join(homedir(), "Library", "LaunchAgents");
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    recordOwnedConfigPath(getConfigDir(), serviceStatePath());
+    if (!existsSync(getConfigDir())) mkdirSync(getConfigDir(), { recursive: true });
+    const p = plistPath();
+    writeFileSync(p, buildPlist(state), "utf8");
+    try { sh(`launchctl unload "${p}" 2>/dev/null`); } catch { /* not loaded */ }
+    sh(`launchctl load -w "${p}"`);
+    writeServiceInstallState();
+  });
 }
 function startLaunchd(): void { sh(`launchctl load -w "${plistPath()}"`); }
 function stopLaunchd(): void { try { sh(`launchctl unload "${plistPath()}"`); } catch { /* not loaded */ } }
@@ -1192,34 +1646,39 @@ function writeServiceAssetWithRetry(path: string, content: string, encoding: "ut
 }
 
 function installWindows(): void {
-  recordOwnedConfigPath(getConfigDir(), serviceStatePath());
-  if (!existsSync(getConfigDir())) mkdirSync(getConfigDir(), { recursive: true });
-  writeServiceApiTokenFile();
-  // Transactional backend switch: installing the scheduler backend removes a native
-  // service first — two live managers would both respawn the proxy (conflict).
-  if (statusWinswRaw() !== "nonexistent") {
-    console.log("🔁 Removing the native (WinSW) service before installing the Task Scheduler backend...");
-    try {
-      uninstallWinswService();
-    } catch (err) {
-      throw new Error(`Cannot remove the native service before switching to Task Scheduler: ${err instanceof Error ? err.message : String(err)}. Remove it manually with 'sc delete ${WINSW_SERVICE_ID}' or retry.`);
-    }
+  withServiceTokenInstallTransaction(state => {
+    recordOwnedConfigPath(getConfigDir(), serviceStatePath());
+    if (!existsSync(getConfigDir())) mkdirSync(getConfigDir(), { recursive: true });
+    // Transactional backend switch: installing the scheduler backend removes a native
+    // service first — two live managers would both respawn the proxy (conflict).
     if (statusWinswRaw() !== "nonexistent") {
-      throw new Error(`Native service registration could not be re-verified after the removal attempt — aborting switch. Check 'sc.exe query ${WINSW_SERVICE_ID}' and remove it manually if present.`);
+      console.log("🔁 Removing the native (WinSW) service before installing the Task Scheduler backend...");
+      try {
+        uninstallWinswService();
+      } catch (err) {
+        throw new Error(`Cannot remove the native service before switching to Task Scheduler: ${err instanceof Error ? err.message : String(err)}. Remove it manually with 'sc delete ${WINSW_SERVICE_ID}' or retry.`);
+      }
+      if (statusWinswRaw() !== "nonexistent") {
+        throw new Error(`Native service registration could not be re-verified after the removal attempt — aborting switch. Check 'sc.exe query ${WINSW_SERVICE_ID}' and remove it manually if present.`);
+      }
     }
-  }
-  // End a running task BEFORE rewriting the assets it is executing — cmd.exe reading the
-  // script mid-rewrite runs a torn batch file, and its open handle can fail the write.
-  try { stopWindows(); } catch { /* not running */ }
-  const script = windowsServiceScriptPath();
-  writeServiceAssetWithRetry(script, buildWindowsServiceScript(), "utf8");
-  // UTF-16LE + BOM: a BOM-less UTF-8 VBS mis-decodes non-ASCII (e.g. Korean) profile
-  // paths on some WSH/codepage combinations — same contract as the task XML below.
-  writeServiceAssetWithRetry(windowsLauncherVbsPath(), `\uFEFF${buildWindowsLauncherVbs(script)}`, "utf16le");
-  writeServiceAssetWithRetry(windowsTaskXmlPath(), `\uFEFF${buildWindowsTaskXml(script)}`, "utf16le");
-  schtasks(buildWindowsSchtasksCreateArgs(script));
-  schtasks(["/run", "/tn", TASK]);
-  writeServiceInstallState("scheduler");
+    // End a running task BEFORE rewriting the assets it is executing — cmd.exe reading the
+    // script mid-rewrite runs a torn batch file, and its open handle can fail the write.
+    try { stopWindows(); } catch { /* not running */ }
+    const script = windowsServiceScriptPath();
+    writeServiceAssetWithRetry(
+      script,
+      buildWindowsServiceScript(undefined, undefined, state),
+      "utf8",
+    );
+    // UTF-16LE + BOM: a BOM-less UTF-8 VBS mis-decodes non-ASCII (e.g. Korean) profile
+    // paths on some WSH/codepage combinations — same contract as the task XML below.
+    writeServiceAssetWithRetry(windowsLauncherVbsPath(), `\uFEFF${buildWindowsLauncherVbs(script)}`, "utf16le");
+    writeServiceAssetWithRetry(windowsTaskXmlPath(), `\uFEFF${buildWindowsTaskXml(script)}`, "utf16le");
+    schtasks(buildWindowsSchtasksCreateArgs(script));
+    schtasks(["/run", "/tn", TASK]);
+    writeServiceInstallState("scheduler");
+  });
 }
 
 /**
@@ -1228,38 +1687,39 @@ function installWindows(): void {
  * reported) — never a silent fallback to the scheduler.
  */
 async function installWindowsNative(): Promise<void> {
-  recordOwnedConfigPath(getConfigDir(), serviceStatePath());
-  if (!existsSync(getConfigDir())) mkdirSync(getConfigDir(), { recursive: true });
-  writeServiceApiTokenFile();
-  let hadScheduler = false;
-  try {
-    hadScheduler = schtasks(["/query", "/tn", TASK]).includes(TASK);
-  } catch { /* task absent */ }
-  if (hadScheduler) {
-    console.log("🔁 Removing the Task Scheduler backend before installing the native (WinSW) service...");
-    try { stopWindows(); } catch { /* not running */ }
+  await withServiceTokenInstallTransactionAsync(async state => {
+    recordOwnedConfigPath(getConfigDir(), serviceStatePath());
+    if (!existsSync(getConfigDir())) mkdirSync(getConfigDir(), { recursive: true });
+    let hadScheduler = false;
     try {
-      uninstallWindows();
-    } catch (err) {
-      throw new Error(`Cannot remove the Task Scheduler backend before switching to native: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    // Verify removal — schtasks /delete can silently fail if UAC or policy blocks it.
-    try {
-      if (schtasks(["/query", "/tn", TASK]).includes(TASK)) {
-        throw new Error("Task Scheduler backend still present after removal — aborting switch.");
+      hadScheduler = schtasks(["/query", "/tn", TASK]).includes(TASK);
+    } catch { /* task absent */ }
+    if (hadScheduler) {
+      console.log("🔁 Removing the Task Scheduler backend before installing the native (WinSW) service...");
+      try { stopWindows(); } catch { /* not running */ }
+      try {
+        uninstallWindows();
+      } catch (err) {
+        throw new Error(`Cannot remove the Task Scheduler backend before switching to native: ${err instanceof Error ? err.message : String(err)}`);
       }
-    } catch (e) {
-      if (e instanceof Error && e.message.includes("still present")) throw e;
-      /* query failure = task absent, which is what we want */
+      // Verify removal — schtasks /delete can silently fail if UAC or policy blocks it.
+      try {
+        if (schtasks(["/query", "/tn", TASK]).includes(TASK)) {
+          throw new Error("Task Scheduler backend still present after removal — aborting switch.");
+        }
+      } catch (e) {
+        if (e instanceof Error && e.message.includes("still present")) throw e;
+        /* query failure = task absent, which is what we want */
+      }
     }
-  }
-  try {
-    await installWinswService(defaultWinswEntry(import.meta.dir));
-  } catch (err) {
-    if (hadScheduler) console.error("⚠️  Native install failed AFTER removing the Task Scheduler backend — no service is installed now. Run `ocx service install` to restore the scheduler backend, or retry `--native`.");
-    throw err;
-  }
-  writeServiceInstallState("native");
+    try {
+      await installWinswService(defaultWinswEntry(import.meta.dir), {}, state);
+    } catch (err) {
+      if (hadScheduler) console.error("⚠️  Native install failed AFTER removing the Task Scheduler backend — no service is installed now. Run `ocx service install` to restore the scheduler backend, or retry `--native`.");
+      throw err;
+    }
+    writeServiceInstallState("native");
+  });
 }
 function startWindows(): void { schtasks(["/run", "/tn", TASK]); }
 function stopWindows(): void { try { schtasks(["/end", "/tn", TASK]); } catch { /* not running */ } }
@@ -1299,12 +1759,15 @@ function unitPath(): string {
   return join(unitDir(), `${TASK}.service`);
 }
 
-export function buildUnit(): string {
+export function buildUnit(state?: ServiceTokenDefinitionState): string {
   const { bun, cli } = cliEntry();
   const log = logPath();
   const path = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
   const codexHome = systemdEnvironmentAssignment("CODEX_HOME", process.env.CODEX_HOME?.trim());
-  const opencodexHome = systemdEnvironmentAssignment("OPENCODEX_HOME", process.env.OPENCODEX_HOME?.trim());
+  const opencodexHome = systemdEnvironmentAssignment(
+    "OPENCODEX_HOME",
+    process.env.OPENCODEX_HOME?.trim() ? getConfigDir() : undefined,
+  );
   const envLines = [
     systemdEnvironmentAssignment("OCX_SERVICE", "1"),
     systemdEnvironmentAssignment("PATH", path),
@@ -1318,7 +1781,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${systemdQuote("/bin/sh")} -lc ${systemdQuote(buildServiceShellCommand(bun, cli))}
+ExecStart=${systemdQuote("/bin/sh")} -lc ${systemdQuote(buildServiceShellCommand(bun, cli, resolveServiceListenPort(), state))}
 Restart=on-failure
 RestartSec=5
 ${envLines}
@@ -1364,17 +1827,18 @@ function isSystemd(): boolean {
 }
 
 function installSystemd(): void {
-  ensureUserBusEnv(); // reach the user bus over a bare SSH session (F9)
-  const dir = unitDir();
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  recordOwnedConfigPath(getConfigDir(), serviceStatePath());
-  if (!existsSync(getConfigDir())) mkdirSync(getConfigDir(), { recursive: true });
-  writeServiceApiTokenFile();
-  writeFileSync(unitPath(), buildUnit(), "utf8");
-  sh("systemctl --user daemon-reload");
-  sh(`systemctl --user enable ${TASK}`);
-  sh(`systemctl --user restart ${TASK}`);
-  writeServiceInstallState();
+  withServiceTokenInstallTransaction(state => {
+    ensureUserBusEnv(); // reach the user bus over a bare SSH session (F9)
+    const dir = unitDir();
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    recordOwnedConfigPath(getConfigDir(), serviceStatePath());
+    if (!existsSync(getConfigDir())) mkdirSync(getConfigDir(), { recursive: true });
+    writeFileSync(unitPath(), buildUnit(state), "utf8");
+    sh("systemctl --user daemon-reload");
+    sh(`systemctl --user enable ${TASK}`);
+    sh(`systemctl --user restart ${TASK}`);
+    writeServiceInstallState();
+  });
 }
 function startSystemd(): void {
   ensureUserBusEnv();
@@ -1779,8 +2243,18 @@ export async function serviceCommand(...args: (string | undefined)[]): Promise<v
         else if (!grok.ok) console.error(`⚠️  ${grok.message}`);
       }
       removeServiceInstallState();
-      try { if (existsSync(serviceApiTokenFilePath())) unlinkSync(serviceApiTokenFilePath()); } catch { /* best-effort */ }
-      console.log("✅ service uninstalled.");
+      {
+        const residualTokens = removeServiceTokenFiles();
+        if (residualTokens.length > 0) {
+          console.error(
+            `❌ service manager removed, but credential cleanup failed for: ${residualTokens.join(", ")}. `
+              + "Remove these files from OPENCODEX_HOME manually.",
+          );
+          process.exitCode = 1;
+        } else {
+          console.log("✅ service uninstalled.");
+        }
+      }
       break;
     default:
       console.error("Usage: ocx service [install|start|stop|status|uninstall|remove] [--native|--scheduler]");

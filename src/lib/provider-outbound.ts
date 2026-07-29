@@ -6,7 +6,12 @@ import {
   resolvePublicAddresses,
 } from "./destination-policy";
 import { pinnedHttpGet } from "./pinned-http";
-import { outboundProxyConfigured } from "./proxy-env";
+import {
+  bunProxyForUrl,
+  proxyEnvPresent,
+  selectedProxyEnv,
+  type ProxyEnvMap,
+} from "./proxy-env";
 import { publicProviderBaseUrl } from "./provider-url";
 
 type ProviderGetInit = Omit<RequestInit, "body" | "method" | "redirect">;
@@ -16,6 +21,7 @@ type ProviderOutboundConfig = Pick<OcxProviderConfig, "baseUrl" | "allowPrivateN
 export interface ProviderOutboundDependencies {
   resolveAddresses?: typeof resolvePublicAddresses;
   pinnedGet?: typeof pinnedHttpGet;
+  proxyEnv?: ProxyEnvMap;
 }
 
 export class ProviderOutboundPolicyError extends Error {
@@ -26,8 +32,8 @@ function pickPinnedAddress(addresses: Array<{ address: string; family: number }>
   return addresses.find(address => address.family === 4) ?? addresses[0]!;
 }
 
-function configuredProxyFor(): boolean {
-  return outboundProxyConfigured();
+function configuredProxyFor(url: URL, env: ProxyEnvMap): boolean {
+  return bunProxyForUrl(url, env) !== undefined;
 }
 
 function normalizeProxyHostname(hostname: string): string {
@@ -37,8 +43,8 @@ function normalizeProxyHostname(hostname: string): string {
     : normalized;
 }
 
-function noProxyMatches(url: URL): boolean {
-  const raw = process.env.NO_PROXY ?? process.env.no_proxy ?? "";
+function noProxyMatches(url: URL, env: ProxyEnvMap): boolean {
+  const raw = selectedProxyEnv("NO_PROXY", env)?.value ?? "";
   const hostname = normalizeProxyHostname(url.hostname);
   const port = url.port || (url.protocol === "https:" ? "443" : "80");
   for (const rawEntry of raw.split(",")) {
@@ -126,7 +132,15 @@ export async function providerOutboundGet(
     return provider.fetch(url, { ...init, method: "GET", redirect: "manual" });
   }
   const parsed = new URL(url);
-  const proxyConfigured = configuredProxyFor();
+  const proxyEnv = dependencies.proxyEnv ?? process.env;
+  const proxyConfigured = configuredProxyFor(parsed, proxyEnv);
+  if (!proxyConfigured && proxyEnvPresent("ALL_PROXY", proxyEnv)) {
+    const supportedKey = parsed.protocol === "https:" ? "HTTPS_PROXY" : "HTTP_PROXY";
+    throw new ProviderOutboundPolicyError(
+      `ALL_PROXY is not supported by the bundled Bun provider transport; set ${supportedKey} for this provider URL`,
+    );
+  }
+  const bypassProxy = proxyConfigured && noProxyMatches(parsed, proxyEnv);
   const resolveAddresses = dependencies.resolveAddresses ?? resolvePublicAddresses;
   const pinnedGet = dependencies.pinnedGet ?? pinnedHttpGet;
   let resolved: Awaited<ReturnType<typeof resolvePublicAddresses>>;
@@ -141,18 +155,18 @@ export async function providerOutboundGet(
     if (!dnsResolutionFailed) {
       throw new ProviderOutboundPolicyError(error instanceof Error ? error.message : "provider destination was blocked");
     }
-    if (!proxyConfigured) throw error;
+    if (!proxyConfigured || bypassProxy) throw error;
     warnProxyBoundaryOnce();
     warnProxyDnsDegradationOnce();
     return globalThis.fetch(url, { ...init, method: "GET", redirect: "manual" });
   }
-  if (proxyConfigured && !resolved.privateNetwork) {
+  if (proxyConfigured && !bypassProxy && !resolved.privateNetwork) {
     warnProxyBoundaryOnce();
     return globalThis.fetch(url, { ...init, method: "GET", redirect: "manual" });
   }
-  if (proxyConfigured && resolved.privateNetwork && !noProxyMatches(parsed)) {
+  if (proxyConfigured && resolved.privateNetwork && !bypassProxy) {
     const hostname = normalizeProxyHostname(parsed.hostname);
-    throw new Error(
+    throw new ProviderOutboundPolicyError(
       `provider URL resolves to a private-network destination; add ${hostname} to NO_PROXY before using allowPrivateNetwork with an outbound proxy`,
     );
   }

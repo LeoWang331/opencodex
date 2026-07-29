@@ -310,7 +310,7 @@ ocx init                       # interactive setup
 ocx start [--port 10100]       # start the proxy; falls back to a free port if busy
 ocx stop                       # stop + restore native Codex
 ocx restore                    # restore without stopping (alias: ocx eject)
-ocx uninstall                  # remove service/shim/config and restore native Codex
+ocx uninstall                  # remove service/shim/owned state and restore native Codex
 ocx ensure                     # start if needed + refresh Codex config/cache
 ocx sync                       # refresh models + re-inject into Codex
 ocx codex-shim install         # run `ocx ensure` whenever `codex` is launched
@@ -384,8 +384,11 @@ ocx uninstall
 npm uninstall -g @bitkyc08/opencodex
 ```
 
-`ocx uninstall` stops the proxy, removes any installed service, removes the Codex shim, restores
-native Codex config/catalog/history, and deletes `~/.opencodex`.
+`ocx uninstall` stops the proxy, removes any installed service, removes the Codex shim, and restores
+native Codex config/catalog/history. It removes local state only through the installation ownership
+manifest: entries not recorded there are preserved. A legacy non-empty config directory without a
+manifest, or a directory that still contains foreign files after owned entries are removed, is left
+in place for manual review. Inspect the path reported by the command before deleting any remainder.
 
 ## Configuration
 
@@ -466,26 +469,55 @@ WebSocket transport is off by default. Set `"websockets": true` only if you want
 
 ### Remote access
 
-By default opencodex binds to `127.0.0.1` (loopback) and requires no extra authentication.
-If you set `"hostname": "0.0.0.0"` to expose the proxy on the LAN, opencodex requires a bearer token
-to protect both the management API (`/api/*`) and the data-plane (`/v1/responses`,
-`/v1/images/generations`, and `/v1/images/edits`):
+By default opencodex binds to `127.0.0.1` (loopback). Authentication is split by role:
+
+- **Data-plane credentials** — `OPENCODEX_API_AUTH_TOKEN`, the protected `service-api-token` file,
+  and dashboard-generated `config.apiKeys` authorize only `/v1/*` and the corresponding WebSocket
+  handshakes. A non-loopback bind requires either `OPENCODEX_API_AUTH_TOKEN` (set directly or
+  delivered through the protected service file) or at least one `config.apiKeys` entry.
+- **Management credentials** — `OPENCODEX_ADMIN_AUTH_TOKEN` or the independent protected
+  `admin-api-token` file authorize only `/api/*`. The server creates the file when no management
+  environment token is configured. Service installs persist an explicit management token through
+  the protected `service-admin-token` delivery file; this is still the same management credential
+  class, not a fourth credential type.
+- **Dashboard sessions** — a legal same-origin loopback dashboard entry receives a short-lived,
+  Origin-bound session that authorizes only `/api/*`. Remote operators and scripts must use the
+  management token instead.
+
+**Upgrade note:** earlier releases also admitted `OPENCODEX_API_AUTH_TOKEN` and `config.apiKeys` to
+`/api/*`. They are data-plane-only after this split. Update existing management scripts to use
+`OPENCODEX_ADMIN_AUTH_TOKEN` or the protected `admin-api-token`; data-plane clients do not need to
+change.
+
+For a LAN bind, configure either form of data-plane credential before starting. The environment-token
+form is shown below. Set an explicit management token as well when remote operators or automation
+need a stable credential:
 
 ```bash
-export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
+export OPENCODEX_API_AUTH_TOKEN="your-data-plane-token"
+export OPENCODEX_ADMIN_AUTH_TOKEN="your-management-token"
 ocx start
 ```
 
-The proxy refuses to start without this variable when binding beyond loopback. If you install a
-background service for LAN access, export the same variable before `ocx service install` so the
-service manager receives it.
-Clients (scripts, remote machines) must include the token in every request:
+Export the same variables before `ocx service install`. The installer writes their values to the
+protected `service-api-token` and `service-admin-token` delivery files; service definitions store
+only those file paths, never the raw token values.
+Data-plane clients and management clients use the same header name, but their credential values are
+not interchangeable:
 
 ```
-x-opencodex-api-key: your-secret-token
+x-opencodex-api-key: the-token-for-this-request-plane
 ```
 
-The token is compared in constant time to prevent timing attacks.
+Use `x-opencodex-api-key` for compatibility across the data plane. `Authorization: Bearer …` is
+also accepted by management routes and data routes that permit bearer admission, but
+`/v1/responses`, `/v1/responses/compact`, `/v1/chat/completions`, and the Responses WebSocket
+handshake require the dedicated `x-opencodex-api-key` header.
+
+If the management token cannot be created, permission-hardened, or read, `/api/*` returns `503` and
+never falls back to loopback trust. `/v1/*` and the unauthenticated `/healthz` endpoint continue to
+operate. Long-lived data-plane and management secrets, plus GUI CSRF tokens, use constant-time
+comparisons; short-lived high-entropy GUI session ids use an in-memory lookup.
 
 opencodex automatically remaps Codex resume history so old OpenAI chats and opencodex-created project
 threads stay visible in Codex App while the proxy is active. opencodex records the original provider/source metadata in
