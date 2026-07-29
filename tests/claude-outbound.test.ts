@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import {
   anthropicErrorBody,
   anthropicErrorType,
@@ -228,20 +228,27 @@ describe("claude outbound SSE", () => {
   });
 
   test("idle keepalive pings flow during upstream silence", async () => {
-    // Upstream: created frame, 90ms of silence, then a clean completion.
-    const encoder = new TextEncoder();
-    const upstream = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        controller.enqueue(encoder.encode(sse("response.created", { response: {} })));
-        await new Promise(r => setTimeout(r, 90));
-        controller.enqueue(encoder.encode(sse("response.completed", { response: { status: "completed", usage: { input_tokens: 1, output_tokens: 1 } } })));
-        controller.close();
-      },
-    });
-    const events = await collectEvents(responsesSseToAnthropicSse(upstream, "m", { pingIntervalMs: 25 }));
-    const pings = events.filter(e => e.name === "ping").length;
-    expect(pings).toBeGreaterThanOrEqual(3); // startup ping + >=2 idle pings
-    expect(events.at(-1)!.name).toBe("message_stop");
+    jest.useFakeTimers();
+    try {
+      // Upstream: created frame, 90ms of silence, then a clean completion.
+      const encoder = new TextEncoder();
+      const upstream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(encoder.encode(sse("response.created", { response: {} })));
+          await new Promise(r => setTimeout(r, 90));
+          controller.enqueue(encoder.encode(sse("response.completed", { response: { status: "completed", usage: { input_tokens: 1, output_tokens: 1 } } })));
+          controller.close();
+        },
+      });
+      const eventsPromise = collectEvents(responsesSseToAnthropicSse(upstream, "m", { pingIntervalMs: 25 }));
+      jest.advanceTimersByTime(90);
+      const events = await eventsPromise;
+      const pings = events.filter(e => e.name === "ping").length;
+      expect(pings).toBeGreaterThanOrEqual(3); // startup ping + >=2 idle pings
+      expect(events.at(-1)!.name).toBe("message_stop");
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test("no-output completed still emits a valid empty message", async () => {
