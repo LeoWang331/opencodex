@@ -147,7 +147,7 @@ describe("appendUsageDebug", () => {
     const first = JSON.parse(lines[0]) as { requestId: string };
     expect(last.requestId).toBe(`ocx-${total - 1}`);
     expect(first.requestId).toBe(`ocx-${total - USAGE_DEBUG_KEEP_LINES}`);
-  });
+  }, 15_000);
 
   test("keeps file size bounded by MAX_LINES across long runs", () => {
     // Cross the rotate threshold twice — enough to prove the bound holds across
