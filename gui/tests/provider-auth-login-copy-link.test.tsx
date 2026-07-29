@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, jest, test } from "bun:test";
 import { Window } from "happy-dom";
 import { act } from "react";
 import type { Root } from "react-dom/client";
@@ -70,6 +70,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  jest.useRealTimers();
   if (root) {
     const current = root;
     await act(async () => { current.unmount(); });
@@ -133,24 +134,28 @@ test("clipboard-less context reports unavailability instead of a false success",
 });
 
 test("repeated copies keep the latest feedback for its full window", async () => {
+  jest.useFakeTimers();
   await mountPanel({ provider: "claude", url: AUTH_URL });
 
   await act(async () => {
     copyLinkButton().dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 0));
+    await Promise.resolve();
   });
   // Second click lands inside the first click's 2.5s feedback window.
   await act(async () => {
-    await new Promise((r) => setTimeout(r, 200));
+    jest.advanceTimersByTime(200);
     copyLinkButton().dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 0));
+    await Promise.resolve();
   });
   expect(clipboardWrites).toEqual([AUTH_URL, AUTH_URL]);
 
-  // Past the FIRST click's expiry but before the second's: an unguarded
-  // timer would have already wiped the second click's feedback here.
-  await act(async () => { await new Promise((r) => setTimeout(r, 2400)); });
+  // Reach the FIRST click's expiry exactly. If its timer was not cancelled,
+  // it would wipe the second click's feedback here.
+  await act(async () => { jest.advanceTimersByTime(2300); });
   expect(host.textContent).toContain("Copied");
+
+  await act(async () => { jest.advanceTimersByTime(200); });
+  expect(host.textContent).not.toContain("Copied");
 });
 
 test("the open-in-browser fallback link survives alongside the copy button", async () => {
