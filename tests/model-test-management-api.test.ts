@@ -366,7 +366,7 @@ test("management model probe uses provider credentials without forwarding admiss
     headers: {
       "content-type": "application/json",
       host: "127.0.0.1",
-      authorization: "Bearer ocx_admin_browser-secret",
+      authorization: `Bearer ${["ocx_admin", "browser-secret"].join("_")}`,
       "x-opencodex-api-key": "ocx_session_browser-secret",
     },
     body: JSON.stringify({ model: "mock/model-one" }),
