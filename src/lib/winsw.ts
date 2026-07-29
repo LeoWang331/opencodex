@@ -22,7 +22,10 @@ import { expandUserPath, getConfigDir, loadConfig } from "../config";
 import { recordOwnedConfigPath } from "./config-ownership";
 import { durableBunPath } from "./bun-runtime";
 import { serviceApiTokenFilePath } from "./service-secrets";
-import { serviceAdminTokenFilePath } from "./admin-secrets";
+import {
+  serviceAdminTokenFileForDefinition,
+  type ServiceTokenDefinitionState,
+} from "./admin-secrets";
 
 export const WINSW_VERSION = "2.12.0";
 export const WINSW_URL = `https://github.com/winsw/winsw/releases/download/v${WINSW_VERSION}/WinSW.NET461.exe`;
@@ -68,9 +71,7 @@ export interface WinswEntry {
   cli: string;
 }
 
-export interface WinswServiceTokenDefinitionState {
-  adminTokenFile: string | null;
-}
+export type WinswServiceTokenDefinitionState = ServiceTokenDefinitionState;
 
 /**
  * Build the WinSW v2 XML. Never embeds the API token value — the app loads it from
@@ -97,9 +98,7 @@ export function buildWinswXml(
   })();
   // Services never bake `--port 0` (parsePortOption rejects it); treat as default.
   const safeListenPort = listenPort > 0 && listenPort <= 65535 ? listenPort : 10100;
-  const adminTokenFile = state
-    ? state.adminTokenFile
-    : (existsSync(serviceAdminTokenFilePath()) ? serviceAdminTokenFilePath() : null);
+  const adminTokenFile = serviceAdminTokenFileForDefinition(state);
   const envLines = [
     `  <env name="OCX_SERVICE" value="1"/>`,
     `  <env name="OCX_API_TOKEN_FILE" value="${xmlEscape(serviceApiTokenFilePath())}"/>`,

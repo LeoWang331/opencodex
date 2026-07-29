@@ -31,9 +31,13 @@ export function loadServiceTokenFromFile(env: Record<string, string | undefined>
  */
 export function loadServiceTokensIntoEnv(
   env: Record<string, string | undefined>,
-  _configDir = getConfigDir(),
+  configDir = getConfigDir(),
 ): void {
-  const dataToken = loadServiceTokenFromFile(env);
+  const dataToken = loadServiceTokenFromFile(
+    env.OCX_API_TOKEN_FILE?.trim()
+      ? env
+      : { ...env, OCX_API_TOKEN_FILE: serviceApiTokenFilePath(configDir) },
+  );
   if (dataToken) env.OPENCODEX_API_AUTH_TOKEN = dataToken;
 }
 

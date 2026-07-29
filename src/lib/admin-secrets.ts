@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "../config";
 import type { OcxConfig } from "../types";
@@ -27,6 +27,19 @@ export function serviceAdminTokenFilePath(configDir = getConfigDir()): string {
   return join(configDir, SERVICE_ADMIN_TOKEN_FILE);
 }
 
+export interface ServiceTokenDefinitionState {
+  adminTokenFile: string | null;
+}
+
+export function serviceAdminTokenFileForDefinition(
+  state?: ServiceTokenDefinitionState,
+  configDir = getConfigDir(),
+): string | null {
+  if (state) return state.adminTokenFile;
+  const path = serviceAdminTokenFilePath(configDir);
+  return existsSync(path) ? path : null;
+}
+
 export function loadAdminTokenFromFile(configDir = getConfigDir()): string | null {
   const path = adminApiTokenFilePath(configDir);
   try {
@@ -48,7 +61,8 @@ export function loadServiceAdminTokenFromFile(
   try {
     const stat = lstatSync(path);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 512) return null;
-    return readFileSync(path, "utf8").trim() || null;
+    const token = readFileSync(path, "utf8").trim();
+    return token && !/[\r\n\0]/.test(token) ? token : null;
   } catch {
     return null;
   }

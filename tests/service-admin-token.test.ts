@@ -15,6 +15,7 @@ import { join, resolve } from "node:path";
 import {
   adminApiTokenFilePath,
   configuredAdminToken,
+  loadServiceAdminTokenFromFile,
   serviceAdminTokenFilePath,
 } from "../src/lib/admin-secrets";
 import { recordOwnedConfigPath } from "../src/lib/config-ownership";
@@ -78,6 +79,96 @@ afterEach(() => {
 });
 
 describe("service management token delivery", () => {
+  test("rejects conflicting explicit service credentials before install mutation", () => {
+    const root = tempRoot();
+    const dataPath = serviceApiTokenFilePath(root);
+    const adminPath = serviceAdminTokenFilePath(root);
+    writeFileSync(dataPath, "original-data\n", "utf8");
+    writeFileSync(adminPath, "original-admin\n", "utf8");
+    let platformCalled = false;
+
+    expect(() => withServiceTokenInstallTransaction(() => {
+      platformCalled = true;
+    }, {
+      configDir: root,
+      env: {
+        OPENCODEX_API_AUTH_TOKEN: "shared-secret",
+        OPENCODEX_ADMIN_AUTH_TOKEN: "shared-secret",
+      },
+      platform: "linux",
+      recordOwnedPath: recordOwnedPathForTransactionTest,
+      config: { apiKeys: [] },
+    })).toThrow(/management credential conflicts with a data-plane credential/);
+
+    expect(platformCalled).toBe(false);
+    expect(readFileSync(dataPath, "utf8")).toBe("original-data\n");
+    expect(readFileSync(adminPath, "utf8")).toBe("original-admin\n");
+  });
+
+  test("rejects an explicit service management credential matching config apiKeys", () => {
+    const root = tempRoot();
+    let platformCalled = false;
+
+    expect(() => withServiceTokenInstallTransaction(() => {
+      platformCalled = true;
+    }, {
+      configDir: root,
+      env: { OPENCODEX_ADMIN_AUTH_TOKEN: "configured-data-secret" },
+      platform: "linux",
+      recordOwnedPath: recordOwnedPathForTransactionTest,
+      config: {
+        apiKeys: [{
+          id: "data-key",
+          name: "Configured data key",
+          key: "configured-data-secret",
+          createdAt: "2026-07-29T00:00:00.000Z",
+        }],
+      },
+    })).toThrow(/management credential conflicts with a data-plane credential/);
+
+    expect(platformCalled).toBe(false);
+    expect(existsSync(serviceApiTokenFilePath(root))).toBe(false);
+    expect(existsSync(serviceAdminTokenFilePath(root))).toBe(false);
+  });
+
+  test("rejects control characters in a file-delivered service management token", () => {
+    const root = tempRoot();
+    const path = serviceAdminTokenFilePath(root);
+    for (const token of ["line-one\nline-two", "line-one\rline-two", "token\0suffix"]) {
+      writeFileSync(path, token, "utf8");
+      expect(loadServiceAdminTokenFromFile({}, root)).toBeNull();
+    }
+  });
+
+  test("fails closed when a fresh data service token cannot be registered as owned", () => {
+    const root = tempRoot();
+
+    expect(() => writeServiceApiTokenFile({
+      configDir: root,
+      env: { OPENCODEX_API_AUTH_TOKEN: "fresh-data" },
+      platform: "linux",
+      recordOwnedPath: () => false,
+    })).toThrow(/ownership manifest/);
+    expect(existsSync(serviceApiTokenFilePath(root))).toBe(false);
+  });
+
+  test("does not treat an ownership-infrastructure-only directory as legacy", () => {
+    const root = tempRoot();
+    writeFileSync(
+      join(root, ".opencodex-owner-recovery.lock"),
+      `${process.pid}:00000000-0000-4000-8000-000000000015\n`,
+      "utf8",
+    );
+
+    expect(() => writeServiceAdminTokenFile({
+      configDir: root,
+      env: { OPENCODEX_ADMIN_AUTH_TOKEN: "fresh-admin" },
+      platform: "linux",
+      recordOwnedPath: () => false,
+    })).toThrow(/ownership manifest/);
+    expect(existsSync(serviceAdminTokenFilePath(root))).toBe(false);
+  });
+
   test("a fresh explicit install failure leaves no service token files behind", () => {
     const root = tempRoot();
 
@@ -668,6 +759,16 @@ describe("service management token delivery", () => {
 
     expect(env.OPENCODEX_API_AUTH_TOKEN).toBe("service-data");
     expect(env.OPENCODEX_ADMIN_AUTH_TOKEN).toBeUndefined();
+  });
+
+  test("startup loading discovers the data service token from the supplied config directory", () => {
+    const root = tempRoot();
+    writeFileSync(serviceApiTokenFilePath(root), "directory-data-token\n", "utf8");
+    const env: Record<string, string | undefined> = {};
+
+    loadServiceTokensIntoEnv(env, root);
+
+    expect(env.OPENCODEX_API_AUTH_TOKEN).toBe("directory-data-token");
   });
 
   test("a data-token ACL timeout preserves the previous token and removes the unsecured replacement", () => {

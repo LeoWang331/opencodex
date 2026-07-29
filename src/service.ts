@@ -17,7 +17,11 @@ import { isWslRuntime } from "./codex/home";
 import { durableBunPath, durableBunRuntime } from "./lib/bun-runtime";
 import { isProcessAlive, stopProxy } from "./lib/process-control";
 import { removeServiceTokenFiles, serviceApiTokenFilePath } from "./lib/service-secrets";
-import { serviceAdminTokenFilePath } from "./lib/admin-secrets";
+import {
+  serviceAdminTokenFileForDefinition,
+  serviceAdminTokenFilePath,
+  type ServiceTokenDefinitionState,
+} from "./lib/admin-secrets";
 import { randomUUID } from "node:crypto";
 import {
   ELEVATION_REQUEST_TIMEOUT_MS,
@@ -38,12 +42,16 @@ import { windowsEnvIndirectBatchPathList, windowsEnvIndirectBatchValue } from ".
 import {
   CONFIG_OWNER_FILE,
   CONFIG_UNINSTALL_MANIFEST,
+  isOwnershipInfrastructureName,
   recordOwnedConfigPath,
 } from "./lib/config-ownership";
 import { assertServerAuthConfig } from "./server/auth-cors";
+import type { OcxConfig } from "./types";
 
 const LABEL = "com.opencodex.proxy";
 const TASK = "opencodex-proxy";
+
+export type { ServiceTokenDefinitionState } from "./lib/admin-secrets";
 
 export type ServiceBackend = "scheduler" | "native";
 
@@ -256,6 +264,7 @@ export interface ServiceApiTokenWriteOptions {
 }
 
 interface ValidatedServiceApiToken {
+  token: string;
   payload: string;
 }
 
@@ -276,7 +285,7 @@ function validatedServiceApiToken(
     }
     return null;
   }
-  return { payload: `${token}\n` };
+  return { token, payload: `${token}\n` };
 }
 
 function writePlannedServiceApiTokenFile(
@@ -298,7 +307,16 @@ function writePlannedServiceApiTokenFile(
     }
     return null;
   }
-  (options.recordOwnedPath ?? recordOwnedConfigPath)(dir, path);
+  const recordOwnedPath = options.recordOwnedPath ?? recordOwnedConfigPath;
+  const legacyUnowned = isLegacyUnownedConfigDir(dir);
+  const recorded = recordOwnedPath(dir, path);
+  if (!recorded) {
+    const ownershipMetadataExists = existsSync(join(dir, CONFIG_OWNER_FILE))
+      || existsSync(join(dir, CONFIG_UNINSTALL_MANIFEST));
+    if (!legacyUnowned || ownershipMetadataExists) {
+      throw new Error("data service token could not be registered in the config ownership manifest");
+    }
+  }
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
   if ((options.platform ?? process.platform) === "win32") {
     const hardened = (options.hardenDir ?? hardenSecretDir)(dir, { required: true });
@@ -365,7 +383,7 @@ function isLegacyUnownedConfigDir(dir: string): boolean {
     || existsSync(join(dir, CONFIG_UNINSTALL_MANIFEST))
   ) return false;
   try {
-    return readdirSync(dir).some(name => name !== ".opencodex-owner.lock");
+    return readdirSync(dir).some(name => !isOwnershipInfrastructureName(name));
   } catch {
     return false;
   }
@@ -431,13 +449,10 @@ export function writeServiceAdminTokenFile(options: ServiceAdminTokenWriteOption
   return path;
 }
 
-export interface ServiceTokenDefinitionState {
-  adminTokenFile: string | null;
-}
-
 export interface ServiceTokenInstallTransactionOptions
   extends ServiceAdminTokenWriteOptions {
   env?: Record<string, string | undefined>;
+  config?: Pick<OcxConfig, "apiKeys">;
 }
 
 interface ServiceTokenFileSnapshot {
@@ -449,7 +464,7 @@ interface ServiceTokenInstallPlan {
   dataToken: ValidatedServiceApiToken | null;
   adminAction:
     | { kind: "write"; token: string }
-    | { kind: "preserve" }
+    | { kind: "preserve"; token: string }
     | { kind: "remove" };
   definitionState: ServiceTokenDefinitionState;
 }
@@ -508,38 +523,53 @@ function validatedServiceTokenInstallValues(
 function buildServiceTokenInstallPlan(
   values: ReturnType<typeof validatedServiceTokenInstallValues>,
   adminSnapshot: ServiceTokenFileSnapshot,
+  config: Pick<OcxConfig, "apiKeys">,
 ): ServiceTokenInstallPlan {
+  let plan: ServiceTokenInstallPlan;
   if (values.explicitAdmin) {
-    return {
+    plan = {
       dataToken: values.dataToken,
       adminAction: { kind: "write", token: values.explicitAdmin.token },
       definitionState: { adminTokenFile: adminSnapshot.path },
     };
-  }
-  if (!values.preserveAdminPointer) {
-    return {
+  } else if (!values.preserveAdminPointer) {
+    plan = {
       dataToken: values.dataToken,
       adminAction: { kind: "remove" },
       definitionState: { adminTokenFile: null },
     };
+  } else {
+    const contents = adminSnapshot.contents;
+    const token = contents?.toString("utf8").trim() ?? "";
+    if (
+      !contents
+      || contents.byteLength > 512
+      || !token
+      || /[\r\n\0]/.test(token)
+    ) {
+      throw new Error(
+        "OCX_ADMIN_TOKEN_FILE does not reference a valid current service-admin-token",
+      );
+    }
+    plan = {
+      dataToken: values.dataToken,
+      adminAction: { kind: "preserve", token },
+      definitionState: { adminTokenFile: adminSnapshot.path },
+    };
   }
-  const contents = adminSnapshot.contents;
-  const token = contents?.toString("utf8").trim() ?? "";
+  const adminToken = plan.adminAction.kind === "remove"
+    ? null
+    : plan.adminAction.token;
   if (
-    !contents
-    || contents.byteLength > 512
-    || !token
-    || /[\r\n\0]/.test(token)
+    adminToken
+    && (
+      adminToken === plan.dataToken?.token
+      || config.apiKeys?.some(entry => entry.key === adminToken)
+    )
   ) {
-    throw new Error(
-      "OCX_ADMIN_TOKEN_FILE does not reference a valid current service-admin-token",
-    );
+    throw new Error("management credential conflicts with a data-plane credential");
   }
-  return {
-    dataToken: values.dataToken,
-    adminAction: { kind: "preserve" },
-    definitionState: { adminTokenFile: adminSnapshot.path },
-  };
+  return plan;
 }
 
 function restoreServiceTokenSnapshot(
@@ -565,7 +595,7 @@ function restoreServiceTokenSnapshot(
   const tempPath = `${snapshot.path}.restore.${process.pid}.${randomUUID()}`;
   try {
     writeFileSync(tempPath, snapshot.contents, { flag: "wx", mode: 0o600 });
-    chmodSync(tempPath, 0o600);
+    try { chmodSync(tempPath, 0o600); } catch { /* best-effort on platforms that ignore chmod */ }
     if (platform === "win32") {
       const hardened = (options.hardenPath ?? hardenSecretPath)(tempPath, { required: true });
       if (!hardened.ok) throw new Error(`${label} rollback file ACL hardening did not complete`);
@@ -623,7 +653,12 @@ function beginServiceTokenInstallTransaction(
     snapshotServiceTokenFile(serviceApiTokenFilePath(configDir)),
     snapshotServiceTokenFile(serviceAdminTokenFilePath(configDir)),
   ];
-  const plan = buildServiceTokenInstallPlan(values, snapshots[1]!);
+  const config = options.config ?? (
+    normalizedPathEquals(configDir, getConfigDir(), platform)
+      ? loadConfig()
+      : { apiKeys: [] }
+  );
+  const plan = buildServiceTokenInstallPlan(values, snapshots[1]!, config);
   if (plan.adminAction.kind === "preserve" && platform === "win32") {
     const hardenedDir = (options.hardenDir ?? hardenSecretDir)(configDir, { required: true });
     if (!hardenedDir.ok) {
@@ -687,14 +722,6 @@ export async function withServiceTokenInstallTransactionAsync<T>(
   } catch (error) {
     rollbackServiceTokenInstall(transaction.snapshots, options, error);
   }
-}
-
-function serviceAdminTokenFileForDefinition(
-  state?: ServiceTokenDefinitionState,
-): string | null {
-  if (state) return state.adminTokenFile;
-  const path = serviceAdminTokenFilePath();
-  return existsSync(path) ? path : null;
 }
 
 export function buildPlist(state?: ServiceTokenDefinitionState): string {
