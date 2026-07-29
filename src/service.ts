@@ -1316,6 +1316,16 @@ function windowsBatchValue(value: string): string {
     .replace(/[\r\n]/g, "");
 }
 
+function isWindowsServicePath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+}
+
+function normalizeWindowsServicePath(value: string): string {
+  return isWindowsServicePath(value)
+    ? win32.normalize(value)
+    : value;
+}
+
 type WindowsBatchValueKind = "raw" | "path" | "pathList";
 
 function windowsBatchSet(name: string, value: string | undefined, kind: WindowsBatchValueKind = "raw"): string | null {
@@ -1345,12 +1355,12 @@ export function buildWindowsServiceScript(
   const bunRuntime = durableBunRuntime();
   const path = process.env.PATH ?? "";
   const configuredOpenCodexHome = process.env.OPENCODEX_HOME?.trim();
-  const openCodexHome = configuredOpenCodexHome
+  const openCodexHome = configuredOpenCodexHome && isWindowsServicePath(configuredOpenCodexHome)
     ? win32.resolve(configuredOpenCodexHome)
-    : win32.normalize(getConfigDir());
-  const apiTokenFile = win32.normalize(serviceApiTokenFilePath(openCodexHome));
+    : getConfigDir();
+  const apiTokenFile = normalizeWindowsServicePath(serviceApiTokenFilePath(openCodexHome));
   const adminTokenFile = serviceAdminTokenFileForDefinition(state);
-  const logFile = win32.normalize(join(openCodexHome, "service.log"));
+  const logFile = normalizeWindowsServicePath(join(openCodexHome, "service.log"));
   const lines = [
     "@echo off",
     "setlocal",
@@ -1367,7 +1377,7 @@ export function buildWindowsServiceScript(
     ),
     windowsBatchSet("OCX_API_TOKEN_FILE", apiTokenFile, "path"),
     adminTokenFile
-      ? windowsBatchSet("OCX_ADMIN_TOKEN_FILE", win32.normalize(adminTokenFile), "path")
+      ? windowsBatchSet("OCX_ADMIN_TOKEN_FILE", normalizeWindowsServicePath(adminTokenFile), "path")
       : "",
     windowsBatchSet("OCX_SERVICE_LOG", logFile, "path"),
     windowsBatchSet("OCX_BUN", bun, "path"),

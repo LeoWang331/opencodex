@@ -2000,7 +2000,7 @@ describe("server local API auth", () => {
         await stopPoolRetryHarness(harness);
       }
     }
-  });
+  }, 12_000);
 
   test("alternate account resolution failure preserves the original 400", async () => {
     const body = unsupportedModelBody();

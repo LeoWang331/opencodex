@@ -48,13 +48,19 @@ jobs:
   test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # The Windows full suite now completes near the old 8-minute ceiling; leave
-    # enough room for the privacy/build smokes instead of cancelling a green run.
-    timeout-minutes: 12
+    # Windows is materially slower than the POSIX runners; keep enough room for
+    # the privacy/build smokes instead of cancelling an otherwise green run.
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            timeout: 12
+          - os: macos-latest
+            timeout: 12
+          - os: windows-latest
+            timeout: 18
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7

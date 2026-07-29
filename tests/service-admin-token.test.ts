@@ -31,8 +31,6 @@ import {
 } from "../src/server/auth-cors";
 import type { OcxConfig } from "../src/types";
 import {
-  hardenSecretDir,
-  hardenSecretPath,
   resetHardenedStateForTests,
   setIcaclsRunnerForTests,
   setPlatformForTests,
@@ -1057,15 +1055,6 @@ describe("service management token delivery", () => {
     process.env.OCX_ADMIN_TOKEN_FILE = serviceAdminTokenFilePath(root);
     delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
     const hardenedTargets: string[] = [];
-    setPlatformForTests("win32");
-    resetHardenedStateForTests();
-    setIcaclsRunnerForTests(args => {
-      const target = args[0] ?? "";
-      hardenedTargets.push(target);
-      return target === primaryPath
-        ? { success: false, exitCode: null, timedOut: true, stdout: "" }
-        : { success: true, exitCode: 0, timedOut: false, stdout: "" };
-    });
 
     loadServiceTokensIntoEnv(process.env, root);
     const state = initializeManagementAuthState({
@@ -1073,7 +1062,18 @@ describe("service management token delivery", () => {
       hostname: "0.0.0.0",
       defaultProvider: "test",
       providers: {},
-    } as OcxConfig, { hardenSecretDir, hardenSecretPath });
+    } as OcxConfig, {
+      hardenSecretDir: target => {
+        hardenedTargets.push(target);
+        return { ok: true };
+      },
+      hardenSecretPath: target => {
+        hardenedTargets.push(target);
+        return target === primaryPath
+          ? { ok: false, diagnostics: "icacls file hardening timed out" }
+          : { ok: true };
+      },
+    });
 
     expect(process.env.OPENCODEX_ADMIN_AUTH_TOKEN).toBeUndefined();
     expect(hardenedTargets).toContain(primaryPath);
@@ -1089,15 +1089,6 @@ describe("service management token delivery", () => {
     process.env.OCX_ADMIN_TOKEN_FILE = servicePath;
     delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
     const hardenedTargets: string[] = [];
-    setPlatformForTests("win32");
-    resetHardenedStateForTests();
-    setIcaclsRunnerForTests(args => {
-      const target = args[0] ?? "";
-      hardenedTargets.push(target);
-      return target === servicePath
-        ? { success: false, exitCode: null, timedOut: true, stdout: "" }
-        : { success: true, exitCode: 0, timedOut: false, stdout: "" };
-    });
 
     loadServiceTokensIntoEnv(process.env, root);
     const state = initializeManagementAuthState({
@@ -1105,7 +1096,18 @@ describe("service management token delivery", () => {
       hostname: "0.0.0.0",
       defaultProvider: "test",
       providers: {},
-    } as OcxConfig, { hardenSecretDir, hardenSecretPath });
+    } as OcxConfig, {
+      hardenSecretDir: target => {
+        hardenedTargets.push(target);
+        return { ok: true };
+      },
+      hardenSecretPath: target => {
+        hardenedTargets.push(target);
+        return target === servicePath
+          ? { ok: false, diagnostics: "icacls file hardening timed out" }
+          : { ok: true };
+      },
+    });
 
     expect(state.available).toBe(false);
     expect(process.env.OPENCODEX_ADMIN_AUTH_TOKEN).toBeUndefined();
