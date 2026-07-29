@@ -325,6 +325,7 @@ test("tests a model through the management API without calling a data-plane endp
   const requests: Array<{ path: string; method: string; body?: unknown }> = [];
   let promptCalls = 0;
   let probeManagementToken: string | null = null;
+  let failProbe = false;
   testWindow.prompt = () => {
     promptCalls += 1;
     return "admin-token";
@@ -348,7 +349,9 @@ test("tests a model through the management API without calling a data-plane endp
     }
     if (url.pathname === "/api/models/test" && method === "POST") {
       probeManagementToken = token;
-      return Response.json({ ok: true });
+      return failProbe
+        ? Response.json({ error: "upstream rejected the model" }, { status: 502 })
+        : Response.json({ ok: true });
     }
     return new Response(null, { status: 404 });
   }) as typeof fetch;
@@ -386,6 +389,14 @@ test("tests a model through the management API without calling a data-plane endp
     expect(probeManagementToken).toBe("admin-token");
     expect(promptCalls).toBe(1);
     expect(container.querySelector(".api-test-note--ok")).not.toBeNull();
+
+    failProbe = true;
+    await act(async () => {
+      testButton!.click();
+      await new Promise<void>((resolve) => testWindow.setTimeout(resolve, 0));
+    });
+    expect(container.querySelector(".api-test-note--error")?.textContent)
+      .toContain("upstream rejected the model");
   } finally {
     await act(async () => root.unmount());
     testWindow.close();

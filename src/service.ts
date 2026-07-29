@@ -8,7 +8,7 @@
 import { execFileSync, execSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, win32 } from "node:path";
 import { expandUserPath, getConfigDir, readPid, removePid, removeRuntimePort } from "./config";
 import { loadConfig } from "./config";
 import { restoreNativeCodex } from "./codex/inject";
@@ -1344,7 +1344,13 @@ export function buildWindowsServiceScript(
   const { bun, cli } = entry;
   const bunRuntime = durableBunRuntime();
   const path = process.env.PATH ?? "";
+  const configuredOpenCodexHome = process.env.OPENCODEX_HOME?.trim();
+  const openCodexHome = configuredOpenCodexHome
+    ? win32.resolve(configuredOpenCodexHome)
+    : win32.normalize(getConfigDir());
+  const apiTokenFile = win32.normalize(serviceApiTokenFilePath(openCodexHome));
   const adminTokenFile = serviceAdminTokenFileForDefinition(state);
+  const logFile = win32.normalize(join(openCodexHome, "service.log"));
   const lines = [
     "@echo off",
     "setlocal",
@@ -1356,14 +1362,14 @@ export function buildWindowsServiceScript(
     windowsBatchSet("CODEX_HOME", process.env.CODEX_HOME?.trim(), "path"),
     windowsBatchSet(
       "OPENCODEX_HOME",
-      process.env.OPENCODEX_HOME?.trim() ? getConfigDir() : undefined,
+      configuredOpenCodexHome ? openCodexHome : undefined,
       "path",
     ),
-    windowsBatchSet("OCX_API_TOKEN_FILE", serviceApiTokenFilePath(), "path"),
+    windowsBatchSet("OCX_API_TOKEN_FILE", apiTokenFile, "path"),
     adminTokenFile
-      ? windowsBatchSet("OCX_ADMIN_TOKEN_FILE", adminTokenFile, "path")
+      ? windowsBatchSet("OCX_ADMIN_TOKEN_FILE", win32.normalize(adminTokenFile), "path")
       : "",
-    windowsBatchSet("OCX_SERVICE_LOG", serviceLogPath(), "path"),
+    windowsBatchSet("OCX_SERVICE_LOG", logFile, "path"),
     windowsBatchSet("OCX_BUN", bun, "path"),
     windowsBatchSet("OCX_CLI", cli, "path"),
     'if exist "%OCX_API_TOKEN_FILE%" (',

@@ -22,11 +22,25 @@ export function selectedProxyEnv(
   return uppercaseValue === undefined ? undefined : { key, value: uppercaseValue };
 }
 
+function selectedNonBlankProxyEnv(
+  key: Exclude<ProxyEnvKey, "NO_PROXY">,
+  env: ProxyEnvMap,
+): SelectedProxyEnv | undefined {
+  const lowercaseKey = key.toLowerCase();
+  const lowercaseValue = env[lowercaseKey];
+  if (lowercaseValue?.trim()) return { key: lowercaseKey, value: lowercaseValue };
+  const uppercaseValue = env[key];
+  return uppercaseValue?.trim() ? { key, value: uppercaseValue } : undefined;
+}
+
 export function proxyEnvPresent(
   key: ProxyEnvKey,
   env: ProxyEnvMap = process.env,
 ): boolean {
-  return Boolean(selectedProxyEnv(key, env)?.value.trim());
+  const selected = key === "NO_PROXY"
+    ? selectedProxyEnv(key, env)
+    : selectedNonBlankProxyEnv(key, env);
+  return Boolean(selected?.value.trim());
 }
 
 export function bunProxyForUrl(
@@ -39,8 +53,7 @@ export function bunProxyForUrl(
       ? "HTTPS_PROXY"
       : undefined;
   if (!key) return undefined;
-  const selected = selectedProxyEnv(key, env);
-  return selected?.value.trim() ? selected : undefined;
+  return selectedNonBlankProxyEnv(key, env);
 }
 
 export function outboundProxyConfigured(

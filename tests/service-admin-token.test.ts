@@ -31,6 +31,8 @@ import {
 } from "../src/server/auth-cors";
 import type { OcxConfig } from "../src/types";
 import {
+  hardenSecretDir,
+  hardenSecretPath,
   resetHardenedStateForTests,
   setIcaclsRunnerForTests,
   setPlatformForTests,
@@ -1071,7 +1073,7 @@ describe("service management token delivery", () => {
       hostname: "0.0.0.0",
       defaultProvider: "test",
       providers: {},
-    } as OcxConfig);
+    } as OcxConfig, { hardenSecretDir, hardenSecretPath });
 
     expect(process.env.OPENCODEX_ADMIN_AUTH_TOKEN).toBeUndefined();
     expect(hardenedTargets).toContain(primaryPath);
@@ -1103,7 +1105,7 @@ describe("service management token delivery", () => {
       hostname: "0.0.0.0",
       defaultProvider: "test",
       providers: {},
-    } as OcxConfig);
+    } as OcxConfig, { hardenSecretDir, hardenSecretPath });
 
     expect(state.available).toBe(false);
     expect(process.env.OPENCODEX_ADMIN_AUTH_TOKEN).toBeUndefined();

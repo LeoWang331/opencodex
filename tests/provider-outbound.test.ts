@@ -403,7 +403,7 @@ describe("provider outbound GET transport", () => {
           NO_PROXY: "other.invalid",
           no_proxy: "route-target.invalid",
         }],
-        ["empty lowercase proxy disables uppercase", "http://route-target.invalid/path", {
+        ["empty lowercase proxy handling is runtime-specific", "http://route-target.invalid/path", {
           HTTP_PROXY: proxyAUrl,
           http_proxy: "",
         }],
@@ -452,7 +452,11 @@ describe("provider outbound GET transport", () => {
       { name: "HTTPS lowercase proxy wins", route: "B", exitCode: 0 },
       { name: "lowercase no_proxy miss wins", route: "A", exitCode: 0 },
       { name: "lowercase no_proxy match wins", route: "direct", exitCode: 0 },
-      { name: "empty lowercase proxy disables uppercase", route: "direct", exitCode: 0 },
+      {
+        name: "empty lowercase proxy handling is runtime-specific",
+        route: process.platform === "win32" ? "direct" : "A",
+        exitCode: 0,
+      },
     ]);
   }, 20_000);
 
@@ -524,6 +528,12 @@ describe("provider outbound GET transport", () => {
           "proxied",
           { baseUrl: "http://proxy-only.invalid/v1", allowPrivateNetwork: false },
           "http://proxy-only.invalid/v1/models",
+          {},
+          {
+            // A plain object can represent the conflicting casing that process.env cannot
+            // express on Windows; the request must still reach the real proxy above.
+            proxyEnv: { HTTP_PROXY: proxyUrl, http_proxy: "" },
+          },
         );
         const outbound = {
           status: outboundResponse.status,

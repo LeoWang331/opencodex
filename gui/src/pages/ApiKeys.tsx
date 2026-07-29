@@ -250,8 +250,17 @@ export default function ApiKeys({ apiBase }: { apiBase: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: modelId }),
       });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null) as { error?: unknown } | null;
+        const detail = typeof payload?.error === "string" ? payload.error : String(res.status);
+        setModelTests(current => ({
+          ...current,
+          [modelId]: { state: "error", detail: detail.slice(0, 160) || String(res.status) },
+        }));
+        return;
+      }
       const payload = await res.json().catch(() => null) as { ok?: unknown; error?: unknown } | null;
-      if (!res.ok || payload?.ok !== true) {
+      if (payload?.ok !== true) {
         const detail = typeof payload?.error === "string" ? payload.error : String(res.status);
         setModelTests(current => ({
           ...current,

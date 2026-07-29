@@ -66,22 +66,31 @@ function fail(reason: string): ManagementAuthState {
   return { available: false, reason };
 }
 
-function assertSafeDirectory(path: string): void {
+export interface ManagementAuthDependencies {
+  hardenSecretDir?: typeof hardenSecretDir;
+  hardenSecretPath?: typeof hardenSecretPath;
+}
+
+function assertSafeDirectory(path: string, dependencies: ManagementAuthDependencies): void {
   mkdirSync(path, { recursive: true, mode: 0o700 });
   const stat = lstatSync(path);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("management token directory is not a regular directory");
   chmodSync(path, 0o700);
-  const hardened = hardenSecretDir(path, { required: true });
+  const hardened = (dependencies.hardenSecretDir ?? hardenSecretDir)(path, { required: true });
   if (!hardened.ok) throw new Error("management token directory ACL hardening did not complete");
 }
 
-function readExistingToken(path: string, kind: "primary" | "service" = "primary"): string {
+function readExistingToken(
+  path: string,
+  kind: "primary" | "service" = "primary",
+  dependencies: ManagementAuthDependencies = {},
+): string {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 512) {
     throw new Error("management token path is not a regular secret file");
   }
   chmodSync(path, 0o600);
-  const hardened = hardenSecretPath(path, { required: true });
+  const hardened = (dependencies.hardenSecretPath ?? hardenSecretPath)(path, { required: true });
   if (!hardened.ok) throw new Error("management token file ACL hardening did not complete");
   const token = readFileSync(path, "utf8").trim();
   const valid = kind === "primary"
@@ -105,7 +114,7 @@ function removeBestEffort(path: string): void {
   try { unlinkSync(path); } catch { /* fail-closed state is preserved by the caller */ }
 }
 
-function createTokenFile(path: string): string {
+function createTokenFile(path: string, dependencies: ManagementAuthDependencies): string {
   const directory = dirname(path);
   const token = `ocx_admin_${randomBytes(32).toString("base64url")}`;
   const temporary = join(directory, `.${randomUUID()}.admin-token.tmp`);
@@ -118,16 +127,17 @@ function createTokenFile(path: string): string {
     closeSync(fd);
     fd = null;
     chmodSync(temporary, 0o600);
-    const temporaryHardened = hardenSecretPath(temporary, { required: true });
+    const hardenPath = dependencies.hardenSecretPath ?? hardenSecretPath;
+    const temporaryHardened = hardenPath(temporary, { required: true });
     if (!temporaryHardened.ok) throw new Error("management token temporary ACL hardening did not complete");
     try {
       linkSync(temporary, path);
       linked = true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") return readExistingToken(path);
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return readExistingToken(path, "primary", dependencies);
       throw error;
     }
-    const finalHardened = hardenSecretPath(path, { required: true });
+    const finalHardened = hardenPath(path, { required: true });
     if (!finalHardened.ok) throw new Error("management token file ACL hardening did not complete");
     return token;
   } catch (error) {
@@ -160,7 +170,10 @@ function isLegacyUnownedConfigDirectory(path: string): boolean {
     && !entries.includes(CONFIG_UNINSTALL_MANIFEST);
 }
 
-export function initializeManagementAuthState(config: OcxConfig): ManagementAuthState {
+export function initializeManagementAuthState(
+  config: OcxConfig,
+  dependencies: ManagementAuthDependencies = {},
+): ManagementAuthState {
   const environmentToken = process.env.OPENCODEX_ADMIN_AUTH_TOKEN?.trim();
   if (environmentToken) {
     return ready(environmentToken, "environment", config);
@@ -173,15 +186,15 @@ export function initializeManagementAuthState(config: OcxConfig): ManagementAuth
       if (!recordOwnedConfigPath(directory, path) && !legacyUnownedDirectory) {
         throw new Error("management token ownership registration failed");
       }
-      assertSafeDirectory(directory);
-      return ready(readExistingToken(path), "file", config);
+      assertSafeDirectory(directory, dependencies);
+      return ready(readExistingToken(path, "primary", dependencies), "file", config);
     }
 
     const configuredServicePath = process.env.OCX_ADMIN_TOKEN_FILE?.trim();
     const servicePath = configuredServicePath || serviceAdminTokenFilePath();
     if (configuredServicePath || secretPathExists(servicePath)) {
-      assertSafeDirectory(dirname(servicePath));
-      return ready(readExistingToken(servicePath, "service"), "file", config);
+      assertSafeDirectory(dirname(servicePath), dependencies);
+      return ready(readExistingToken(servicePath, "service", dependencies), "file", config);
     }
 
     // Fresh installs establish ownership before the token makes the directory non-empty.
@@ -190,8 +203,8 @@ export function initializeManagementAuthState(config: OcxConfig): ManagementAuth
     if (!recordOwnedConfigPath(directory, path) && !legacyUnownedDirectory) {
       throw new Error("management token ownership registration failed");
     }
-    assertSafeDirectory(directory);
-    return ready(createTokenFile(path), "file", config);
+    assertSafeDirectory(directory, dependencies);
+    return ready(createTokenFile(path, dependencies), "file", config);
   } catch (error) {
     clearActiveAdminToken(config);
     console.warn(MANAGEMENT_AUTH_UNAVAILABLE_WARNING);

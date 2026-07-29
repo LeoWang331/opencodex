@@ -11,6 +11,7 @@ import {
   proxyEnvPresent,
   selectedProxyEnv,
   type ProxyEnvMap,
+  type SelectedProxyEnv,
 } from "./proxy-env";
 import { publicProviderBaseUrl } from "./provider-url";
 
@@ -32,8 +33,22 @@ function pickPinnedAddress(addresses: Array<{ address: string; family: number }>
   return addresses.find(address => address.family === 4) ?? addresses[0]!;
 }
 
-function configuredProxyFor(url: URL, env: ProxyEnvMap): boolean {
-  return bunProxyForUrl(url, env) !== undefined;
+function configuredProxyFor(url: URL, env: ProxyEnvMap): SelectedProxyEnv | undefined {
+  return bunProxyForUrl(url, env);
+}
+
+function fetchThroughProxy(
+  url: string,
+  init: ProviderGetInit,
+  proxy: SelectedProxyEnv,
+): Promise<Response> {
+  const proxyInit = {
+    ...init,
+    method: "GET",
+    redirect: "manual",
+    proxy: proxy.value,
+  } as RequestInit & { proxy: string };
+  return globalThis.fetch(url, proxyInit);
 }
 
 function normalizeProxyHostname(hostname: string): string {
@@ -133,8 +148,9 @@ export async function providerOutboundGet(
   }
   const parsed = new URL(url);
   const proxyEnv = dependencies.proxyEnv ?? process.env;
-  const proxyConfigured = configuredProxyFor(parsed, proxyEnv);
-  if (!proxyConfigured && proxyEnvPresent("ALL_PROXY", proxyEnv)) {
+  const configuredProxy = configuredProxyFor(parsed, proxyEnv);
+  const proxyConfigured = configuredProxy !== undefined;
+  if (!configuredProxy && proxyEnvPresent("ALL_PROXY", proxyEnv)) {
     const supportedKey = parsed.protocol === "https:" ? "HTTPS_PROXY" : "HTTP_PROXY";
     throw new ProviderOutboundPolicyError(
       `ALL_PROXY is not supported by the bundled Bun provider transport; set ${supportedKey} for this provider URL`,
@@ -158,11 +174,11 @@ export async function providerOutboundGet(
     if (!proxyConfigured || bypassProxy) throw error;
     warnProxyBoundaryOnce();
     warnProxyDnsDegradationOnce();
-    return globalThis.fetch(url, { ...init, method: "GET", redirect: "manual" });
+    return fetchThroughProxy(url, init, configuredProxy!);
   }
   if (proxyConfigured && !bypassProxy && !resolved.privateNetwork) {
     warnProxyBoundaryOnce();
-    return globalThis.fetch(url, { ...init, method: "GET", redirect: "manual" });
+    return fetchThroughProxy(url, init, configuredProxy!);
   }
   if (proxyConfigured && resolved.privateNetwork && !bypassProxy) {
     const hostname = normalizeProxyHostname(parsed.hostname);
