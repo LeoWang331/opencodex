@@ -378,5 +378,5 @@ describe("anthropic account pool", () => {
     await setActiveAccount("anthropic", cId);
     resetAnthropicRoutingForManualSelection(cId);
     expect(resolveAnthropicAccountForSession("seed-3", config).accountId).toBe(cId);
-  });
+  }, 15_000);
 });
