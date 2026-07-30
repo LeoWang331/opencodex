@@ -156,8 +156,8 @@ describe("appendUsageDebug", () => {
     // These 325 appends still cost ~1,950 synchronous fs calls: six per append
     // (mkdir + chmod from ensureUsageDebugDir, then append, chmod, exists, read),
     // plus a write/chmod pair on each of the two rotations. On windows-latest under
-    // full-suite load that measured 13.6s — past the 5s default — while ubuntu and
-    // macos stay well under it. The cost is per-open (Defender scans each handle),
+    // full-suite load has exceeded 16s while ubuntu and macos stay well under it.
+    // The cost is per-open (Defender scans each handle),
     // not per-byte, so shaving one of the six calls would not move it enough to
     // matter. Give the test the time it needs instead of trading away coverage:
     // 325 is already the minimum that crosses the rotate threshold twice.
@@ -169,5 +169,5 @@ describe("appendUsageDebug", () => {
     const lines = readFileSync(path, "utf-8").split(/\r?\n/).filter(Boolean);
     expect(lines.length).toBeLessThanOrEqual(USAGE_DEBUG_MAX_LINES);
     expect(lines.length).toBeGreaterThanOrEqual(USAGE_DEBUG_KEEP_LINES);
-  }, 15_000);
+  }, process.platform === "win32" ? 30_000 : 15_000);
 });
