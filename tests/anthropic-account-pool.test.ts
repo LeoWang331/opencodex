@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,8 @@ import {
 import { getAccountSet, saveCredential, setActiveAccount } from "../src/oauth/store";
 import { clearAccountQuotaCache, setCachedProviderAccountQuotaForTests } from "../src/providers/quota";
 import type { OcxAccountPoolRotationStrategy, OcxConfig } from "../src/types";
+
+setDefaultTimeout(process.platform === "win32" ? 15_000 : 5_000);
 
 const originalHome = process.env.OPENCODEX_HOME;
 let home: string;
