@@ -8,7 +8,10 @@ export interface ManagementApiDeps {
   clearThreadAccountMap?: () => void;
   clearProviderQuotaCache?: () => void;
   primeCodexPoolQuotas?: (config: OcxConfig, reason: string) => Promise<void> | void;
-  runStartupInstallAction?: (action: StartupInstallAction) => Promise<{ message: string }>;
+  runStartupInstallAction?: (
+    action: StartupInstallAction,
+    options?: { repair?: boolean },
+  ) => Promise<{ message: string }>;
   providerDestinationResolvedError?: typeof providerDestinationResolvedError;
 }
 
