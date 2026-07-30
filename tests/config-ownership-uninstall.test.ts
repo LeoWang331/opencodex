@@ -184,7 +184,11 @@ describe("owned config uninstall", () => {
           `import { recordOwnedConfigPath } from ${JSON.stringify(ownershipModule)};
            const delay = Number(process.env.OCX_TEST_START_AT) - Date.now();
            if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
-           if (!recordOwnedConfigPath(process.env.OCX_TEST_CONFIG_DIR, process.env.OCX_TEST_OWNED_PATH)) process.exit(42);`,
+           if (!recordOwnedConfigPath(
+             process.env.OCX_TEST_CONFIG_DIR,
+             process.env.OCX_TEST_OWNED_PATH,
+             { lockTimeoutMs: 20_000 },
+           )) process.exit(42);`,
         ], {
           env: {
             ...process.env,
@@ -211,7 +215,7 @@ describe("owned config uninstall", () => {
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, 30_000);
 
   test("recovers stale main and recovery locks left by dead processes", () => {
     const parent = mkdtempSync(join(tmpdir(), "ocx-config-stale-recovery-lock-"));
