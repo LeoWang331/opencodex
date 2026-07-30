@@ -21,6 +21,14 @@ ocx start
 bun run dev:gui
 ```
 
+## Sign-in
+
+On the default loopback bind (`localhost` / `127.0.0.1`) the dashboard never asks for a token:
+the proxy mints short-lived GUI sessions into the served page and renews them silently when
+they expire or the proxy restarts. Only a dashboard bound to a non-loopback hostname requires
+the admin token (`OPENCODEX_ADMIN_AUTH_TOKEN`, or the auto-generated
+`~/.opencodex/admin-api-token` file).
+
 Dashboard responses set `X-Frame-Options: DENY` and CSP `frame-ancestors 'none'` to prevent
 clickjacking. Embedding the dashboard in an `iframe` is intentionally unsupported; open it as a
 top-level page through `ocx gui`.

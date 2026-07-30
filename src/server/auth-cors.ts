@@ -13,7 +13,7 @@ import {
 } from "../config";
 import { providerDestinationConfigError } from "../lib/destination-policy";
 import { activeAdminToken } from "../lib/admin-secrets";
-import { getProviderRegistryEntry, providerCodexAccountMode } from "../providers/registry";
+import { getProviderRegistryEntry, providerCodexAccountMode, providerMatchesRegistryTransport } from "../providers/registry";
 import { providerConfigSeed } from "../providers/derive";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { openRouterRoutingConfigError } from "../providers/openrouter-routing";
@@ -422,7 +422,9 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     ] as const) {
       copyIfDefined(dto, provider, key);
     }
-    const registryNote = getProviderRegistryEntry(name)?.note;
+    const registryNote = providerMatchesRegistryTransport(name, provider)
+      ? getProviderRegistryEntry(name)?.note
+      : undefined;
     if (typeof registryNote === "string" && registryNote.trim()) dto.note = registryNote;
     const codexAccountMode = providerCodexAccountMode(name, provider);
     if (codexAccountMode) dto.codexAccountMode = codexAccountMode;

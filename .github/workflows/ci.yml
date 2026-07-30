@@ -2,7 +2,7 @@ name: Cross-platform CI
 
 on:
   pull_request:
-    branches: [main, dev, dev2-go]
+    branches: [main, dev]
     paths:
       - "src/**"
       - "bin/**"
@@ -48,8 +48,9 @@ jobs:
   test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # Windows is materially slower than the POSIX runners; keep enough room for
-    # the privacy/build smokes instead of cancelling an otherwise green run.
+    # Windows dominates this matrix: recent green runs took about 11.8 minutes
+    # versus 4.6 on Linux and 5.6 on macOS. Keep platform-specific ceilings so
+    # POSIX regressions remain bounded while Windows has enough runner margin.
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
@@ -60,7 +61,7 @@ jobs:
           - os: macos-latest
             timeout: 12
           - os: windows-latest
-            timeout: 18
+            timeout: 20
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
