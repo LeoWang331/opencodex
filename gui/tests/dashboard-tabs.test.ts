@@ -60,7 +60,7 @@ test("Dashboard uses the shared page-tabs strip with a tablist", async () => {
   // The left rail is gone.
   expect(page).not.toContain("dashboard-workspace-rail");
 
-  // Short page-tab strips may wrap instead of introducing a horizontal scrollbar.
+  // Short tab strips wrap instead of creating a horizontal scrollbar (Q7).
   const css = await Bun.file(new URL("../src/styles.css", import.meta.url)).text();
   const strip = css.slice(css.indexOf(".page-tabs {"), css.indexOf("}", css.indexOf(".page-tabs {")));
   expect(strip).toContain("flex-wrap: wrap");

@@ -131,8 +131,8 @@ test("successful redeem clears a stale error toast tone", async () => {
   await act(async () => { removeBtn!.dispatchEvent(new win.MouseEvent("click", { bubbles: true })); });
   await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
 
-  const errorFeedback = host.querySelector(".codex-auth-page-head__feedback.is-err");
-  expect(errorFeedback).toBeTruthy();
+  const errNotice = host.querySelector(".codex-auth-page-head__feedback.is-err");
+  expect(errNotice).toBeTruthy();
 
   const resetBtn = host.querySelector('button[aria-label="2 reset credit(s)"]') as HTMLButtonElement | null;
   expect(resetBtn).toBeTruthy();

@@ -277,7 +277,7 @@ test("the last genuine threshold read is cached for surfaces that mount later", 
   expect(seen.current!.readLastThreshold()).toBe(80);
 });
 
-test("late subscribers replay the last genuine server read", async () => {
+test("subscribing never fabricates a server read", async () => {
   const seen = await mountController();
   const received: unknown[] = [];
 
@@ -289,14 +289,16 @@ test("late subscribers replay the last genuine server read", async () => {
     });
   });
 
-  const activePayload = { activeCodexAccountId: null, autoSwitchThreshold: 80 };
-  // Replay the actual cached payload so a surface mounted after the initial request
-  // initializes immediately without fabricating a threshold-only response.
-  expect(received).toEqual([activePayload]);
+  // Subscribing stays silent: useCodexAutoSwitch treats every acceptActiveRead as
+  // belonging to a read that genuinely started at that revision, so synthesising one
+  // corrupts its editing/saving disposition and overwrites drafts. Late surfaces seed
+  // themselves through readLastThreshold() + hydrateServerValue() instead, which applies
+  // only while uninitialized.
+  expect(received).toEqual([]);
 
   // And a real load does reach the subscriber.
   await act(async () => { await seen.current!.load(); });
-  expect(received).toEqual([activePayload, activePayload]);
+  expect(received).toEqual([{ activeCodexAccountId: null, autoSwitchThreshold: 80 }]);
 });
 
 test("a mutation updates the one shared controller state", async () => {
