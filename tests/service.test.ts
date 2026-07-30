@@ -670,6 +670,7 @@ describe("service lifecycle cleanup ordering", () => {
     expect(installWindows).not.toContain("writeFileSync(script");
     expect(assetsHelper).toContain("writeServiceAssetWithRetry(script");
     expect(assetsHelper).toContain("writeServiceAssetWithRetry(windowsTaskXmlPath()");
+    expect(assetsHelper).not.toContain("writeServiceApiTokenFile()");
     // Retry helper tolerates transient Windows file locks from the just-ended task.
     expect(service).toContain('code !== "EBUSY" && code !== "EPERM" && code !== "EACCES"');
   });

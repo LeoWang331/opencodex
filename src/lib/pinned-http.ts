@@ -1,41 +1,49 @@
 import http, { type IncomingMessage, type RequestOptions } from "node:http";
 import https from "node:https";
+import { once } from "node:events";
 
 export type PinnedAddress = { address: string; family: number };
 
-export interface PinnedHttpGetOptions {
+export interface PinnedHttpRequestOptions {
   headers?: HeadersInit;
   maxBytes?: number;
   idleTimeoutMs?: number;
   rejectUnauthorized?: boolean;
   context?: string;
+  /** Internal GET behavior: return non-success metadata without consuming its body. */
+  discardNonSuccessBody?: boolean;
 }
 
+export type PinnedHttpGetOptions = PinnedHttpRequestOptions;
+
 /**
- * GET a URL through one previously validated address. The original hostname
- * remains authoritative for Host, SNI, and certificate verification.
+ * Send one request through a previously validated address. The original hostname
+ * remains authoritative for Host, SNI, and certificate verification, and redirects
+ * are returned to the caller without being followed.
  */
-export function pinnedHttpGet(
-  url: string,
+export function pinnedHttpRequest(
+  request: Request,
   pinned: PinnedAddress,
-  signal?: AbortSignal,
-  options?: PinnedHttpGetOptions,
+  options?: PinnedHttpRequestOptions,
 ): Promise<Response> {
-  const parsed = new URL(url);
+  const parsed = new URL(request.url);
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error(`${options?.context ?? "request"} must use HTTP or HTTPS, got ${parsed.protocol}`);
   }
   const context = options?.context ?? "request";
   const idleTimeoutMs = options?.idleTimeoutMs ?? 60_000;
   const maxBytes = options?.maxBytes;
-  const headers = new Headers(options?.headers);
+  const headers = new Headers(request.headers);
+  if (options?.headers) {
+    new Headers(options.headers).forEach((value, key) => headers.set(key, value));
+  }
   headers.set("host", parsed.host);
   const requestHeaders: Record<string, string> = {};
   headers.forEach((value, key) => { requestHeaders[key] = value; });
 
   return new Promise<Response>((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
+    if (request.signal.aborted) {
+      reject(request.signal.reason instanceof Error ? request.signal.reason : new Error("aborted"));
       return;
     }
 
@@ -51,7 +59,7 @@ export function pinnedHttpGet(
       hostname: parsed.hostname,
       port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
       path: `${parsed.pathname}${parsed.search}`,
-      method: "GET",
+      method: request.method,
       headers: requestHeaders,
       ...(parsed.protocol === "https:"
         ? {
@@ -90,11 +98,11 @@ export function pinnedHttpGet(
         }
       }
 
-      if (status < 200 || status >= 300) {
-        try { response.destroy(); } catch { /* ignore */ }
-        try { req.destroy(); } catch { /* ignore */ }
+      if (options?.discardNonSuccessBody && (status < 200 || status >= 300)) {
         if (settled) return;
         settled = true;
+        try { response.destroy(); } catch { /* ignore */ }
+        try { req.destroy(); } catch { /* ignore */ }
         resolve(new Response(null, { status, headers: responseHeaders }));
         return;
       }
@@ -138,14 +146,46 @@ export function pinnedHttpGet(
 
     const requestFn = parsed.protocol === "https:" ? https.request : http.request;
     const req = requestFn(requestOptions, onResponse);
-    const onAbort = () => fail(signal?.reason instanceof Error ? signal.reason : new Error("aborted"));
-    signal?.addEventListener("abort", onAbort, { once: true });
+    const onAbort = () => fail(request.signal.reason instanceof Error ? request.signal.reason : new Error("aborted"));
+    request.signal.addEventListener("abort", onAbort, { once: true });
     req.setTimeout(idleTimeoutMs, () => fail(new Error(`${context} timed out`)));
     req.on("error", error => {
-      signal?.removeEventListener("abort", onAbort);
+      request.signal.removeEventListener("abort", onAbort);
       fail(error);
     });
-    req.on("close", () => signal?.removeEventListener("abort", onAbort));
-    req.end();
+    req.on("close", () => request.signal.removeEventListener("abort", onAbort));
+    void (async () => {
+      try {
+        const reader = request.body?.getReader();
+        if (reader) {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!req.write(Buffer.from(value))) await once(req, "drain");
+          }
+        }
+        req.end();
+      } catch (error) {
+        fail(error);
+      }
+    })();
   });
+}
+
+/**
+ * GET a URL through one previously validated address. The original hostname
+ * remains authoritative for Host, SNI, and certificate verification.
+ */
+export async function pinnedHttpGet(
+  url: string,
+  pinned: PinnedAddress,
+  signal?: AbortSignal,
+  options?: PinnedHttpGetOptions,
+): Promise<Response> {
+  const response = await pinnedHttpRequest(new Request(url, {
+    method: "GET",
+    headers: options?.headers,
+    signal,
+  }), pinned, { ...options, discardNonSuccessBody: true });
+  return response;
 }

@@ -24,6 +24,7 @@ import {
 } from "../../oauth";
 import { removeCredential } from "../../oauth/store";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
+import { createProviderModelProbeFetch } from "../../lib/provider-outbound";
 import { signalWithTimeout } from "../../lib/abort";
 import { decodeServerSentEvents } from "../../lib/sse-decoder";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
@@ -203,6 +204,21 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       }
     }
 
+    const createProbeFetch = deps.createProviderModelProbeFetch
+      ?? createProviderModelProbeFetch;
+    const probeConfig: OcxConfig = {
+      ...config,
+      providers: { ...config.providers },
+    };
+    for (const route of probeRoutes) {
+      const provider = probeConfig.providers[route.providerName];
+      if (!provider) continue;
+      probeConfig.providers[route.providerName] = {
+        ...provider,
+        fetch: createProbeFetch(route.providerName, provider),
+      } as OcxProviderConfig;
+    }
+
     const deadline = signalWithTimeout(MODEL_PROBE_TIMEOUT_MS, req.signal);
     const stop = new AbortController();
     const probeSignal = AbortSignal.any([deadline.signal, stop.signal]);
@@ -224,7 +240,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       const { handleResponses } = await import("../responses");
       const response = await handleResponses(
         probeRequest,
-        config,
+        probeConfig,
         { model, provider: "" },
         { abortSignal: probeSignal },
       );

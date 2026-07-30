@@ -259,6 +259,13 @@ separately generated and protected
 token through the protected `service-admin-token` delivery file; this remains a management
 credential, not a fourth credential type.
 
+For a service process, management credentials are selected in this order:
+`OPENCODEX_ADMIN_AUTH_TOKEN`, the protected primary `admin-api-token` file, then the
+`service-admin-token` file named by `OCX_ADMIN_TOKEN_FILE`. If `admin-api-token` already exists,
+running `ocx service install` with a new explicit management token updates the service delivery
+file but does not override that primary file. Keep using the primary credential, or remove the
+primary file deliberately before relying on the new service-delivered credential.
+
 :::caution[Credential migration]
 Earlier releases also admitted `OPENCODEX_API_AUTH_TOKEN` and `config.apiKeys` to `/api/*`. They are
 data-plane-only after this split. Update existing management scripts to use

@@ -4,13 +4,30 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveCodexAccountCredential } from "../src/codex/account-store";
 import { clearCodexUpstreamHealth } from "../src/codex/routing";
-import { handleManagementAPI } from "../src/server/management-api";
+import {
+  handleManagementAPI as handleManagementAPIRaw,
+  type ManagementApiDeps,
+} from "../src/server/management-api";
 import { MODEL_PROBE_TIMEOUT_MS } from "../src/server/management/model-routes";
 import type { OcxConfig, OcxProviderConfig } from "../src/types";
 
 function providerFetchStub(handler: () => Response | Promise<Response>): typeof fetch {
   return Object.assign(async () => handler(), {
     preconnect: () => undefined,
+  });
+}
+
+function handleManagementAPI(
+  request: Request,
+  url: URL,
+  config: OcxConfig,
+  deps: ManagementApiDeps = {},
+): ReturnType<typeof handleManagementAPIRaw> {
+  return handleManagementAPIRaw(request, url, config, {
+    createProviderModelProbeFetch: (_name, provider) => (
+      (provider as OcxProviderConfig & { fetch?: typeof fetch }).fetch ?? globalThis.fetch
+    ),
+    ...deps,
   });
 }
 
@@ -221,6 +238,59 @@ test("management model probe validates every selectable combo destination before
   expect(response?.status).toBe(400);
   expect(checked).toEqual(["safe", "blocked"]);
   expect(upstreamCalls).toBe(0);
+});
+
+test("management model probe installs a safe executor for every selectable combo destination", async () => {
+  const factoryCalls: string[] = [];
+  const upstreamCalls: string[] = [];
+  const provider = (name: string): OcxProviderConfig & { fetch: typeof fetch } => ({
+    adapter: "openai-chat",
+    baseUrl: `https://${name}.example.test/v1`,
+    apiKey: `${name}-secret`,
+    liveModels: false,
+    models: ["model-one"],
+    fetch: providerFetchStub(() => {
+      upstreamCalls.push(name);
+      return new Response([
+        'data: {"choices":[{"index":0,"delta":{"content":"pong"}}]}\n\n',
+        "data: [DONE]\n\n",
+      ].join(""), { headers: { "content-type": "text/event-stream" } });
+    }),
+  });
+  const config = {
+    port: 0,
+    hostname: "127.0.0.1",
+    defaultProvider: "first",
+    providers: {
+      first: provider("first"),
+      second: provider("second"),
+    },
+    combos: {
+      guarded: {
+        targets: [
+          { provider: "first", model: "model-one" },
+          { provider: "second", model: "model-one" },
+        ],
+      },
+    },
+  } as OcxConfig;
+  const url = new URL("http://127.0.0.1/api/models/test");
+
+  const response = await handleManagementAPI(new Request(url, {
+    method: "POST",
+    headers: { host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify({ model: "combo/guarded" }),
+  }), url, config, {
+    providerDestinationResolvedError: async () => null,
+    createProviderModelProbeFetch: (name, configured) => {
+      factoryCalls.push(name);
+      return (configured as OcxProviderConfig & { fetch: typeof fetch }).fetch;
+    },
+  });
+
+  expect(response?.status).toBe(200);
+  expect(factoryCalls).toEqual(["first", "second"]);
+  expect(upstreamCalls).toHaveLength(1);
 });
 
 test("management model catalog fails closed for missing or disabled providers across model types", async () => {

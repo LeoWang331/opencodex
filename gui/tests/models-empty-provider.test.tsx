@@ -166,7 +166,8 @@ test("Models page combines final visibility, atomic actions, discovery status, a
     });
 
     const switchFor = (id: string) => container.querySelector<HTMLButtonElement>(`button[aria-label="${provider}/${id}"]`)!;
-    const buttonText = (text: string) => [...container.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === text)!;
+    const buttonText = (text: string) => [...container.querySelectorAll<HTMLButtonElement>("button")].find(button => (button.textContent ?? "").includes(text))!;
+    await act(async () => { buttonText("Expand all").click(); });
     expect(container.textContent).toContain("2/5 visible");
     expect(switchFor("gemini-pro").getAttribute("aria-pressed")).toBe("true");
     expect(switchFor("claude-sonnet").getAttribute("aria-pressed")).toBe("false");
@@ -550,6 +551,10 @@ test("a poll that resolves after a forced refresh cannot overwrite newer models"
       );
     });
     await act(async () => { await new Promise(resolve => testWindow.setTimeout(resolve, 0)); await Promise.resolve(); });
+    const expandAll = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find(button => (button.textContent ?? "").includes("Expand all"));
+    expect(expandAll).toBeTruthy();
+    await act(async () => { expandAll!.click(); });
     expect(container.textContent).toContain("stale-a");
 
     // Start the poll and leave its /api/models response pending.

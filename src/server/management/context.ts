@@ -1,5 +1,6 @@
 import type { OcxConfig } from "../../types";
 import type { providerDestinationResolvedError } from "../../lib/destination-policy";
+import type { createProviderModelProbeFetch } from "../../lib/provider-outbound";
 import type { StartupInstallAction } from "../startup-action-control";
 
 export interface ManagementApiDeps {
@@ -13,6 +14,7 @@ export interface ManagementApiDeps {
     options?: { repair?: boolean },
   ) => Promise<{ message: string }>;
   providerDestinationResolvedError?: typeof providerDestinationResolvedError;
+  createProviderModelProbeFetch?: typeof createProviderModelProbeFetch;
 }
 
 

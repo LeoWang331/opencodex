@@ -35,12 +35,15 @@ test("main and added account cards expose the same persisted pause control", asy
   const pool = await read("../src/components/CodexAccountPool.tsx");
   const mainCard = await read("../src/components/codex-account-pool-main-card.tsx");
   const addedCards = await read("../src/components/codex-account-pool-cards.tsx");
+  const helpers = await read("../src/components/codex-account-pool-helpers.tsx");
 
   expect(pool).toContain("controller.setAccountPaused(account.id, paused)");
   expect(mainCard).toContain("onTogglePause(mainSwitchEntry)");
   expect(addedCards).toContain("onTogglePause(a)");
-  expect(mainCard).toContain('t(main.paused ? "codexAuth.resume" : "codexAuth.pause")');
-  expect(addedCards).toContain('t(a.paused ? "codexAuth.resume" : "codexAuth.pause")');
+  expect(mainCard).toContain("<CodexPauseToggleLabel");
+  expect(addedCards).toContain("<CodexPauseToggleLabel");
+  expect(helpers).toContain('const pause = t("codexAuth.pause")');
+  expect(helpers).toContain('const resume = t("codexAuth.resume")');
 });
 
 test("the pool header exposes one bulk action backed by the atomic endpoint", async () => {

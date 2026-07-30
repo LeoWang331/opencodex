@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProviderOutboundDependencies } from "../src/lib/provider-outbound";
@@ -64,6 +65,69 @@ async function runIsolatedBun(
 }
 
 describe("provider outbound GET transport", () => {
+  test("pins a POST to the validated peer and never follows its redirect", async () => {
+    for (const key of proxyKeys) delete process.env[key];
+    let safeRequests = 0;
+    let dangerousRequests = 0;
+    let receivedBody = "";
+    const dangerous = createServer((_request, response) => {
+      dangerousRequests += 1;
+      response.writeHead(200).end("dangerous target reached");
+    });
+    const safe = createServer(async (request, response) => {
+      safeRequests += 1;
+      for await (const chunk of request) receivedBody += chunk.toString();
+      const dangerousAddress = dangerous.address();
+      if (!dangerousAddress || typeof dangerousAddress === "string") throw new Error("missing dangerous port");
+      response.writeHead(307, {
+        location: `http://127.0.0.1:${dangerousAddress.port}/metadata`,
+      }).end();
+    });
+    const listen = (server: typeof safe) => new Promise<number>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (!address || typeof address === "string") reject(new Error("missing server port"));
+        else resolve(address.port);
+      });
+    });
+    const close = (server: typeof safe) => new Promise<void>(resolve => server.close(() => resolve()));
+
+    try {
+      const [safePort] = await Promise.all([listen(safe), listen(dangerous)]);
+      const requestUrl = `http://provider.example:${safePort}/v1/chat/completions`;
+      const { createProviderModelProbeFetch } = await import("../src/lib/provider-outbound");
+      const executor = createProviderModelProbeFetch("custom", {
+        baseUrl: `http://provider.example:${safePort}/v1`,
+      }, {
+        proxyEnv: {},
+        resolveAddresses: mock(async () => ({
+          hostname: "provider.example",
+          addresses: [{ address: "127.0.0.1", family: 4 }],
+          privateNetwork: false,
+        })),
+      });
+
+      const response = await executor(requestUrl, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer provider-secret",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "model-one", stream: true }),
+      });
+
+      expect(response.status).toBe(307);
+      await response.body?.cancel();
+      await Bun.sleep(20);
+      expect(safeRequests).toBe(1);
+      expect(JSON.parse(receivedBody)).toEqual({ model: "model-one", stream: true });
+      expect(dangerousRequests).toBe(0);
+    } finally {
+      await Promise.all([close(safe), close(dangerous)]);
+    }
+  });
+
   test("pins direct transport when Bun has no proxy for the request protocol", async () => {
     const { providerOutboundGet } = await import("../src/lib/provider-outbound");
     const cases = [

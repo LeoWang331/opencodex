@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useI18n, type TFn, type Locale } from "../i18n/shared";
 import { EmptyState } from "../ui";
 import { IconRefresh } from "../icons";
@@ -132,7 +132,7 @@ function ArchivedCleanupPanel({
     if (!confirmOpen) return;
     previousFocusRef.current = document.activeElement as HTMLElement | null;
     cancelRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key === "Escape" && !busyRef.current) closeConfirm();
     };
     window.addEventListener("keydown", onKey);
@@ -376,7 +376,7 @@ function QuarantineTrashPanel({
     if (!confirmEntry) return;
     previousFocusRef.current = document.activeElement as HTMLElement | null;
     cancelRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key === "Escape" && !busyRef.current) closeConfirm();
     };
     window.addEventListener("keydown", onKey);
@@ -1270,7 +1270,7 @@ function StorageCleanupCard({
     window.requestAnimationFrame(() => (next === "policy" ? policyTabRef : quarantineTabRef).current?.focus());
   };
 
-  const handleTabKey = (event: KeyboardEvent<HTMLButtonElement>) => {
+  const handleTabKey = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
       event.preventDefault();
       selectTab(tab === "policy" ? "quarantine" : "policy");

@@ -79,6 +79,84 @@ afterEach(() => {
 });
 
 describe("service management token delivery", () => {
+  test("an automatic reinstall preserves both existing service credentials", () => {
+    const root = tempRoot();
+    const dataPath = serviceApiTokenFilePath(root);
+    const adminPath = serviceAdminTokenFilePath(root);
+    const originalData = Buffer.from("data-for-automation\n", "utf8");
+    const originalAdmin = Buffer.from("admin-for-automation\n", "utf8");
+    writeFileSync(dataPath, originalData);
+    writeFileSync(adminPath, originalAdmin);
+
+    const state = withServiceTokenInstallTransaction(definitionState => definitionState, {
+      configDir: root,
+      env: {},
+      platform: "linux",
+      recordOwnedPath: recordOwnedPathForTransactionTest,
+      config: { apiKeys: [] },
+    });
+
+    expect(state.adminTokenFile).toBe(adminPath);
+    expect(readFileSync(dataPath)).toEqual(originalData);
+    expect(readFileSync(adminPath)).toEqual(originalAdmin);
+  });
+
+  test("rejects an admin credential matching the preserved service data credential", () => {
+    const root = tempRoot();
+    const dataPath = serviceApiTokenFilePath(root);
+    const adminPath = serviceAdminTokenFilePath(root);
+    writeFileSync(dataPath, "shared-service-secret\n", "utf8");
+    writeFileSync(adminPath, "original-admin\n", "utf8");
+    let platformCalled = false;
+
+    expect(() => withServiceTokenInstallTransaction(() => {
+      platformCalled = true;
+    }, {
+      configDir: root,
+      env: { OPENCODEX_ADMIN_AUTH_TOKEN: "shared-service-secret" },
+      platform: "linux",
+      recordOwnedPath: recordOwnedPathForTransactionTest,
+      config: { apiKeys: [] },
+    })).toThrow(/management credential conflicts with a data-plane credential/);
+
+    expect(platformCalled).toBe(false);
+    expect(readFileSync(dataPath, "utf8")).toBe("shared-service-secret\n");
+    expect(readFileSync(adminPath, "utf8")).toBe("original-admin\n");
+  });
+
+  test("a failed install restores service assets together with both credentials", () => {
+    const root = tempRoot();
+    const dataPath = serviceApiTokenFilePath(root);
+    const adminPath = serviceAdminTokenFilePath(root);
+    const assetPath = join(root, "service-definition.xml");
+    writeFileSync(dataPath, "original-data\n", "utf8");
+    writeFileSync(adminPath, "original-admin\n", "utf8");
+    writeFileSync(assetPath, "original-definition\n", "utf8");
+    let restoredDefinition = "";
+
+    expect(() => withServiceTokenInstallTransaction(() => {
+      writeFileSync(assetPath, "replacement-definition\n", "utf8");
+      throw new Error("platform install failed");
+    }, {
+      configDir: root,
+      env: {
+        OPENCODEX_API_AUTH_TOKEN: "replacement-data",
+        OPENCODEX_ADMIN_AUTH_TOKEN: "replacement-admin",
+      },
+      platform: "linux",
+      recordOwnedPath: recordOwnedPathForTransactionTest,
+      serviceAssetPaths: [assetPath],
+      restoreServiceDefinition: () => {
+        restoredDefinition = readFileSync(assetPath, "utf8");
+      },
+    })).toThrow(/platform install failed/);
+
+    expect(readFileSync(dataPath, "utf8")).toBe("original-data\n");
+    expect(readFileSync(adminPath, "utf8")).toBe("original-admin\n");
+    expect(readFileSync(assetPath, "utf8")).toBe("original-definition\n");
+    expect(restoredDefinition).toBe("original-definition\n");
+  });
+
   test("rejects conflicting explicit service credentials before install mutation", () => {
     const root = tempRoot();
     const dataPath = serviceApiTokenFilePath(root);
@@ -250,7 +328,7 @@ describe("service management token delivery", () => {
       throw new Error("platform install failed");
     }, {
       configDir: root,
-      env: {},
+      env: { OPENCODEX_ADMIN_AUTH_TOKEN: "" },
       platform: "linux",
       recordOwnedPath: recordOwnedPathForTransactionTest,
     })).toThrow(/platform install failed/);

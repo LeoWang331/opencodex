@@ -5,7 +5,7 @@ import {
   providerDestinationConfigError,
   resolvePublicAddresses,
 } from "./destination-policy";
-import { pinnedHttpGet } from "./pinned-http";
+import { pinnedHttpGet, pinnedHttpRequest } from "./pinned-http";
 import {
   bunProxyForUrl,
   proxyEnvPresent,
@@ -22,6 +22,7 @@ type ProviderOutboundConfig = Pick<OcxProviderConfig, "baseUrl" | "allowPrivateN
 export interface ProviderOutboundDependencies {
   resolveAddresses?: typeof resolvePublicAddresses;
   pinnedGet?: typeof pinnedHttpGet;
+  pinnedRequest?: typeof pinnedHttpRequest;
   proxyEnv?: ProxyEnvMap;
 }
 
@@ -49,6 +50,13 @@ function fetchThroughProxy(
     proxy: proxy.value,
   } as RequestInit & { proxy: string };
   return globalThis.fetch(url, proxyInit);
+}
+
+function requestThroughProxy(request: Request, proxy: SelectedProxyEnv): Promise<Response> {
+  return globalThis.fetch(request, {
+    redirect: "manual",
+    proxy: proxy.value,
+  } as RequestInit & { proxy: string });
 }
 
 function normalizeProxyHostname(hostname: string): string {
@@ -191,4 +199,66 @@ export async function providerOutboundGet(
     rejectUnauthorized: true,
     context: "provider response",
   });
+}
+
+/**
+ * Build the transport used only by management model probes. Each actual request
+ * resolves immediately before dispatch and passes that result to the fixed-peer
+ * transport. Caller-owned provider fetch overrides are intentionally ignored here.
+ */
+export function createProviderModelProbeFetch(
+  name: string,
+  provider: Pick<OcxProviderConfig, "baseUrl" | "allowPrivateNetwork">,
+  dependencies: ProviderOutboundDependencies = {},
+): typeof globalThis.fetch {
+  const executor = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const request = input instanceof Request && init === undefined
+      ? input
+      : new Request(input, init);
+    const parsed = new URL(request.url);
+    const proxyEnv = dependencies.proxyEnv ?? process.env;
+    const configuredProxy = configuredProxyFor(parsed, proxyEnv);
+    const proxyConfigured = configuredProxy !== undefined;
+    if (!configuredProxy && proxyEnvPresent("ALL_PROXY", proxyEnv)) {
+      const supportedKey = parsed.protocol === "https:" ? "HTTPS_PROXY" : "HTTP_PROXY";
+      throw new ProviderOutboundPolicyError(
+        `ALL_PROXY is not supported by the bundled Bun provider transport; set ${supportedKey} for this provider URL`,
+      );
+    }
+    const bypassProxy = proxyConfigured && noProxyMatches(parsed, proxyEnv);
+    const resolveAddresses = dependencies.resolveAddresses ?? resolvePublicAddresses;
+    let resolved: Awaited<ReturnType<typeof resolvePublicAddresses>>;
+    try {
+      resolved = await resolveAddresses(request.url, {
+        context: "provider URL",
+        allowPrivateNetwork: provider.allowPrivateNetwork,
+      });
+    } catch (error) {
+      const dnsResolutionFailed = error instanceof DestinationDnsResolutionError
+        || (error instanceof Error && error.name === "DestinationDnsResolutionError");
+      if (!dnsResolutionFailed) {
+        throw new ProviderOutboundPolicyError(error instanceof Error ? error.message : "provider destination was blocked");
+      }
+      if (!proxyConfigured || bypassProxy) throw error;
+      warnProxyBoundaryOnce();
+      warnProxyDnsDegradationOnce();
+      return requestThroughProxy(request, configuredProxy!);
+    }
+    if (proxyConfigured && !bypassProxy && !resolved.privateNetwork) {
+      warnProxyBoundaryOnce();
+      return requestThroughProxy(request, configuredProxy!);
+    }
+    if (proxyConfigured && resolved.privateNetwork && !bypassProxy) {
+      const hostname = normalizeProxyHostname(parsed.hostname);
+      throw new ProviderOutboundPolicyError(
+        `provider URL resolves to a private-network destination; add ${hostname} to NO_PROXY before using allowPrivateNetwork with an outbound proxy`,
+      );
+    }
+    const pinnedRequest = dependencies.pinnedRequest ?? pinnedHttpRequest;
+    return pinnedRequest(request, pickPinnedAddress(resolved.addresses), {
+      rejectUnauthorized: true,
+      context: `${name} model probe response`,
+    });
+  };
+  return Object.assign(executor, { preconnect: () => undefined }) as typeof globalThis.fetch;
 }

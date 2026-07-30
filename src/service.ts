@@ -22,7 +22,7 @@ import {
   serviceAdminTokenFilePath,
   type ServiceTokenDefinitionState,
 } from "./lib/admin-secrets";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
   ELEVATION_REQUEST_TIMEOUT_MS,
   OCX_ELEVATED_PROTOCOL_FAILED,
@@ -36,7 +36,7 @@ import {
   type ElevatedSchtasksCreateAndRunExecution,
   type ElevatedSchtasksCreateAndRunResult,
 } from "./lib/windows-elevation";
-import { defaultWinswEntry, installWinswService, startWinswService, stopWinswService, statusWinswRaw, uninstallWinswService, winswStatusSummary, WINSW_SERVICE_ID, WINSW_SHA256, WINSW_VERSION } from "./lib/winsw";
+import { defaultWinswEntry, installWinswService, startWinswService, stopWinswService, statusWinswRaw, uninstallWinswService, winswStatusSummary, winswXmlPath, WINSW_SERVICE_ID, WINSW_SHA256, WINSW_VERSION } from "./lib/winsw";
 import { hardenSecretDir, hardenSecretPath } from "./lib/windows-secret-acl";
 import { windowsEnvIndirectBatchPathList, windowsEnvIndirectBatchValue } from "./lib/win-paths";
 import {
@@ -454,15 +454,23 @@ export interface ServiceTokenInstallTransactionOptions
   extends ServiceAdminTokenWriteOptions {
   env?: Record<string, string | undefined>;
   config?: Pick<OcxConfig, "apiKeys">;
+  serviceAssetPaths?: string[];
+  restoreServiceDefinition?: () => void;
 }
 
-interface ServiceTokenFileSnapshot {
+interface ServiceFileSnapshot {
   path: string;
   contents: Buffer | null;
+  mode: number;
+  label: string;
+  secret: boolean;
 }
 
 interface ServiceTokenInstallPlan {
-  dataToken: ValidatedServiceApiToken | null;
+  dataAction:
+    | { kind: "write"; token: ValidatedServiceApiToken }
+    | { kind: "preserve"; token: string | null }
+    | { kind: "remove" };
   adminAction:
     | { kind: "write"; token: string }
     | { kind: "preserve"; token: string }
@@ -484,17 +492,29 @@ function normalizedPathEquals(left: string, right: string, platform: string): bo
     : normalizedLeft === normalizedRight;
 }
 
-function snapshotServiceTokenFile(path: string): ServiceTokenFileSnapshot {
+function snapshotServiceFile(path: string, label: string, secret = false): ServiceFileSnapshot {
   try {
     const stat = lstatSync(path);
     if (!stat.isFile() || stat.isSymbolicLink()) {
-      throw new Error(`service token snapshot refused a non-regular file at ${path}`);
+      throw new Error(`service install snapshot refused a non-regular file at ${path}`);
     }
-    return { path, contents: Buffer.from(readFileSync(path)) };
+    return { path, contents: Buffer.from(readFileSync(path)), mode: stat.mode & 0o777, label, secret };
   } catch (error) {
-    if (errorCode(error) === "ENOENT") return { path, contents: null };
+    if (errorCode(error) === "ENOENT") return { path, contents: null, mode: 0o600, label, secret };
     throw error;
   }
+}
+
+function serviceSnapshotToken(snapshot: ServiceFileSnapshot): string | null {
+  const token = snapshot.contents?.toString("utf8").trim() ?? "";
+  return token || null;
+}
+
+function constantTimeSecretEquals(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left, "utf8");
+  const rightBytes = Buffer.from(right, "utf8");
+  return leftBytes.byteLength === rightBytes.byteLength
+    && timingSafeEqual(leftBytes, rightBytes);
 }
 
 function validatedServiceTokenInstallValues(
@@ -503,14 +523,33 @@ function validatedServiceTokenInstallValues(
   platform: string,
 ): {
   dataToken: ValidatedServiceApiToken | null;
+  preserveDataToken: boolean;
   explicitAdmin: { token: string; payload: string } | null;
   preserveAdminPointer: boolean;
+  preserveExistingAdmin: boolean;
 } {
   const dataToken = validatedServiceApiToken(env);
+  const preserveDataToken = env.OPENCODEX_API_AUTH_TOKEN === undefined;
   const explicitAdmin = validatedServiceAdminToken(env);
+  const explicitAdminVariable = env.OPENCODEX_ADMIN_AUTH_TOKEN !== undefined;
   const adminPointer = env.OCX_ADMIN_TOKEN_FILE?.trim();
-  if (explicitAdmin || !adminPointer) {
-    return { dataToken, explicitAdmin, preserveAdminPointer: false };
+  if (explicitAdmin || explicitAdminVariable) {
+    return {
+      dataToken,
+      preserveDataToken,
+      explicitAdmin,
+      preserveAdminPointer: false,
+      preserveExistingAdmin: false,
+    };
+  }
+  if (!adminPointer) {
+    return {
+      dataToken,
+      preserveDataToken,
+      explicitAdmin: null,
+      preserveAdminPointer: false,
+      preserveExistingAdmin: true,
+    };
   }
   const expectedPath = serviceAdminTokenFilePath(configDir);
   if (!normalizedPathEquals(adminPointer, expectedPath, platform)) {
@@ -518,29 +557,48 @@ function validatedServiceTokenInstallValues(
       "OCX_ADMIN_TOKEN_FILE must resolve to the current service-admin-token before reinstalling the service",
     );
   }
-  return { dataToken, explicitAdmin: null, preserveAdminPointer: true };
+  return {
+    dataToken,
+    preserveDataToken,
+    explicitAdmin: null,
+    preserveAdminPointer: true,
+    preserveExistingAdmin: false,
+  };
 }
 
 function buildServiceTokenInstallPlan(
   values: ReturnType<typeof validatedServiceTokenInstallValues>,
-  adminSnapshot: ServiceTokenFileSnapshot,
+  dataSnapshot: ServiceFileSnapshot,
+  adminSnapshot: ServiceFileSnapshot,
   config: Pick<OcxConfig, "apiKeys">,
 ): ServiceTokenInstallPlan {
+  const dataAction: ServiceTokenInstallPlan["dataAction"] = values.preserveDataToken
+    ? { kind: "preserve", token: serviceSnapshotToken(dataSnapshot) }
+    : values.dataToken
+      ? { kind: "write", token: values.dataToken }
+      : { kind: "remove" };
   let plan: ServiceTokenInstallPlan;
   if (values.explicitAdmin) {
     plan = {
-      dataToken: values.dataToken,
+      dataAction,
       adminAction: { kind: "write", token: values.explicitAdmin.token },
       definitionState: { adminTokenFile: adminSnapshot.path },
     };
-  } else if (!values.preserveAdminPointer) {
+  } else if (!values.preserveAdminPointer && !values.preserveExistingAdmin) {
     plan = {
-      dataToken: values.dataToken,
+      dataAction,
       adminAction: { kind: "remove" },
       definitionState: { adminTokenFile: null },
     };
   } else {
     const contents = adminSnapshot.contents;
+    if (!contents && values.preserveExistingAdmin) {
+      return {
+        dataAction,
+        adminAction: { kind: "remove" },
+        definitionState: { adminTokenFile: null },
+      };
+    }
     const token = contents?.toString("utf8").trim() ?? "";
     if (
       !contents
@@ -553,7 +611,7 @@ function buildServiceTokenInstallPlan(
       );
     }
     plan = {
-      dataToken: values.dataToken,
+      dataAction,
       adminAction: { kind: "preserve", token },
       definitionState: { adminTokenFile: adminSnapshot.path },
     };
@@ -561,11 +619,16 @@ function buildServiceTokenInstallPlan(
   const adminToken = plan.adminAction.kind === "remove"
     ? null
     : plan.adminAction.token;
+  const dataToken = plan.dataAction.kind === "write"
+    ? plan.dataAction.token.token
+    : plan.dataAction.kind === "preserve"
+      ? plan.dataAction.token
+      : null;
   if (
     adminToken
     && (
-      adminToken === plan.dataToken?.token
-      || config.apiKeys?.some(entry => entry.key === adminToken)
+      (dataToken !== null && constantTimeSecretEquals(adminToken, dataToken))
+      || config.apiKeys?.some(entry => constantTimeSecretEquals(entry.key, adminToken))
     )
   ) {
     throw new Error("management credential conflicts with a data-plane credential");
@@ -573,11 +636,11 @@ function buildServiceTokenInstallPlan(
   return plan;
 }
 
-function restoreServiceTokenSnapshot(
-  snapshot: ServiceTokenFileSnapshot,
-  label: string,
+function restoreServiceFileSnapshot(
+  snapshot: ServiceFileSnapshot,
   options: ServiceTokenInstallTransactionOptions,
 ): void {
+  const label = snapshot.label;
   if (!snapshot.contents) {
     try {
       unlinkSync(snapshot.path);
@@ -589,15 +652,15 @@ function restoreServiceTokenSnapshot(
   const dir = dirname(snapshot.path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const platform = options.platform ?? process.platform;
-  if (platform === "win32") {
+  if (platform === "win32" && snapshot.secret) {
     const hardened = (options.hardenDir ?? hardenSecretDir)(dir, { required: true });
     if (!hardened.ok) throw new Error(`${label} rollback directory ACL hardening did not complete`);
   }
   const tempPath = `${snapshot.path}.restore.${process.pid}.${randomUUID()}`;
   try {
-    writeFileSync(tempPath, snapshot.contents, { flag: "wx", mode: 0o600 });
-    try { chmodSync(tempPath, 0o600); } catch { /* best-effort on platforms that ignore chmod */ }
-    if (platform === "win32") {
+    writeFileSync(tempPath, snapshot.contents, { flag: "wx", mode: snapshot.mode });
+    try { chmodSync(tempPath, snapshot.mode); } catch { /* best-effort on platforms that ignore chmod */ }
+    if (platform === "win32" && snapshot.secret) {
       const hardened = (options.hardenPath ?? hardenSecretPath)(tempPath, { required: true });
       if (!hardened.ok) throw new Error(`${label} rollback file ACL hardening did not complete`);
     }
@@ -616,18 +679,25 @@ function restoreServiceTokenSnapshot(
   }
 }
 
-function rollbackServiceTokenInstall(
-  snapshots: ServiceTokenFileSnapshot[],
+function rollbackServiceInstall(
+  snapshots: ServiceFileSnapshot[],
   options: ServiceTokenInstallTransactionOptions,
   installError: unknown,
+  restoreDefinition: boolean,
 ): never {
   const failures: string[] = [];
-  const labels = ["data service token", "management service token"];
-  for (let index = 0; index < snapshots.length; index++) {
+  for (const snapshot of snapshots) {
     try {
-      restoreServiceTokenSnapshot(snapshots[index]!, labels[index]!, options);
+      restoreServiceFileSnapshot(snapshot, options);
     } catch (error) {
-      failures.push(`${labels[index]}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`${snapshot.label}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (restoreDefinition && options.restoreServiceDefinition) {
+    try {
+      options.restoreServiceDefinition();
+    } catch (error) {
+      failures.push(`service definition: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   if (failures.length > 0) {
@@ -644,22 +714,27 @@ function beginServiceTokenInstallTransaction(
   options: ServiceTokenInstallTransactionOptions,
 ): {
   definitionState: ServiceTokenDefinitionState;
-  snapshots: ServiceTokenFileSnapshot[];
+  snapshots: ServiceFileSnapshot[];
 } {
   const env = options.env ?? process.env;
   const configDir = options.configDir ?? getConfigDir();
   const platform = options.platform ?? process.platform;
   const values = validatedServiceTokenInstallValues(env, configDir, platform);
-  const snapshots = [
-    snapshotServiceTokenFile(serviceApiTokenFilePath(configDir)),
-    snapshotServiceTokenFile(serviceAdminTokenFilePath(configDir)),
+  const tokenSnapshots = [
+    snapshotServiceFile(serviceApiTokenFilePath(configDir), "data service token", true),
+    snapshotServiceFile(serviceAdminTokenFilePath(configDir), "management service token", true),
   ];
+  const tokenPaths = new Set(tokenSnapshots.map(snapshot => normalizePathForCompare(snapshot.path)));
+  const assetSnapshots = [...new Set(options.serviceAssetPaths ?? [])]
+    .filter(path => !tokenPaths.has(normalizePathForCompare(path)))
+    .map(path => snapshotServiceFile(path, `service asset ${path}`));
+  const snapshots = [...tokenSnapshots, ...assetSnapshots];
   const config = options.config ?? (
     normalizedPathEquals(configDir, getConfigDir(), platform)
       ? loadConfig()
       : { apiKeys: [] }
   );
-  const plan = buildServiceTokenInstallPlan(values, snapshots[1]!, config);
+  const plan = buildServiceTokenInstallPlan(values, tokenSnapshots[0]!, tokenSnapshots[1]!, config);
   if (plan.adminAction.kind === "preserve" && platform === "win32") {
     const hardenedDir = (options.hardenDir ?? hardenSecretDir)(configDir, { required: true });
     if (!hardenedDir.ok) {
@@ -678,11 +753,16 @@ function beginServiceTokenInstallTransaction(
     }
   }
   try {
-    writePlannedServiceApiTokenFile(plan.dataToken, {
-      ...options,
-      configDir,
-      platform,
-    });
+    if (plan.dataAction.kind !== "preserve") {
+      writePlannedServiceApiTokenFile(
+        plan.dataAction.kind === "write" ? plan.dataAction.token : null,
+        {
+          ...options,
+          configDir,
+          platform,
+        },
+      );
+    }
     if (plan.adminAction.kind !== "preserve") {
       writeServiceAdminTokenFile({
         ...options,
@@ -696,7 +776,7 @@ function beginServiceTokenInstallTransaction(
       });
     }
   } catch (error) {
-    rollbackServiceTokenInstall(snapshots, options, error);
+    rollbackServiceInstall(snapshots, options, error, false);
   }
   return { definitionState: plan.definitionState, snapshots };
 }
@@ -709,7 +789,7 @@ export function withServiceTokenInstallTransaction<T>(
   try {
     return install(transaction.definitionState);
   } catch (error) {
-    rollbackServiceTokenInstall(transaction.snapshots, options, error);
+    rollbackServiceInstall(transaction.snapshots, options, error, true);
   }
 }
 
@@ -721,7 +801,7 @@ export async function withServiceTokenInstallTransactionAsync<T>(
   try {
     return await install(transaction.definitionState);
   } catch (error) {
-    rollbackServiceTokenInstall(transaction.snapshots, options, error);
+    rollbackServiceInstall(transaction.snapshots, options, error, true);
   }
 }
 
@@ -1711,16 +1791,24 @@ export function readWindowsSchedulerXmlState(
 
 // ── macOS (launchd) ──
 function installLaunchd(): void {
+  const p = plistPath();
+  const hadDefinition = existsSync(p);
+  const wasLoaded = statusLaunchd().includes(LABEL);
   withServiceTokenInstallTransaction(state => {
     const dir = join(homedir(), "Library", "LaunchAgents");
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     recordOwnedConfigPath(getConfigDir(), serviceStatePath());
     if (!existsSync(getConfigDir())) mkdirSync(getConfigDir(), { recursive: true });
-    const p = plistPath();
     writeFileSync(p, buildPlist(state), "utf8");
     try { sh(`launchctl unload "${p}" 2>/dev/null`); } catch { /* not loaded */ }
     sh(`launchctl load -w "${p}"`);
     writeServiceInstallState();
+  }, {
+    serviceAssetPaths: [p, ...serviceStatePaths()],
+    restoreServiceDefinition: () => {
+      try { sh(`launchctl unload "${p}" 2>/dev/null`); } catch { /* not loaded */ }
+      if (hadDefinition && wasLoaded) sh(`launchctl load -w "${p}"`);
+    },
   });
 }
 function startLaunchd(): void { sh(`launchctl load -w "${plistPath()}"`); }
@@ -1756,7 +1844,6 @@ function writeServiceAssetWithRetry(path: string, content: string, encoding: "ut
  */
 function writeWindowsSchedulerAssets(state?: ServiceTokenDefinitionState): void {
   if (!existsSync(getConfigDir())) mkdirSync(getConfigDir(), { recursive: true });
-  if (!state) writeServiceApiTokenFile();
   const script = windowsServiceScriptPath();
   writeServiceAssetWithRetry(script,
     buildWindowsServiceScript(undefined, undefined, state),
@@ -1769,6 +1856,7 @@ function writeWindowsSchedulerAssets(state?: ServiceTokenDefinitionState): void 
 }
 
 function installWindows(): void {
+  const previousTaskXml = statusWindowsXml();
   withServiceTokenInstallTransaction(state => {
     recordOwnedConfigPath(getConfigDir(), serviceStatePath());
     // Transactional backend switch: installing the scheduler backend removes a native
@@ -1792,6 +1880,35 @@ function installWindows(): void {
     schtasks(buildWindowsSchtasksCreateArgs(script));
     schtasks(["/run", "/tn", TASK]);
     writeServiceInstallState("scheduler");
+  }, {
+    serviceAssetPaths: [
+      windowsServiceScriptPath(),
+      windowsLauncherVbsPath(),
+      windowsTaskXmlPath(),
+      ...serviceStatePaths(),
+    ],
+    restoreServiceDefinition: () => {
+      try { stopWindows(); } catch { /* not running */ }
+      if (!previousTaskXml) {
+        try { schtasks(["/delete", "/tn", TASK, "/f"]); } catch { /* absent */ }
+        return;
+      }
+      let definitionPath = windowsTaskXmlPath();
+      let temporaryPath: string | null = null;
+      if (!existsSync(definitionPath)) {
+        temporaryPath = `${definitionPath}.restore.${process.pid}.${randomUUID()}`;
+        writeFileSync(temporaryPath, `\uFEFF${previousTaskXml}`, "utf16le");
+        definitionPath = temporaryPath;
+      }
+      try {
+        schtasks(["/create", "/tn", TASK, "/xml", definitionPath, "/f"]);
+        schtasks(["/run", "/tn", TASK]);
+      } finally {
+        if (temporaryPath) {
+          try { unlinkSync(temporaryPath); } catch { /* rollback error is reported by registration */ }
+        }
+      }
+    },
   });
 }
 
@@ -1899,6 +2016,8 @@ async function installWindowsNative(): Promise<void> {
       throw err;
     }
     writeServiceInstallState("native");
+  }, {
+    serviceAssetPaths: [winswXmlPath(), ...serviceStatePaths()],
   });
 }
 function startWindows(): void { schtasks(["/run", "/tn", TASK]); }
@@ -2007,8 +2126,15 @@ function isSystemd(): boolean {
 }
 
 function installSystemd(): void {
+  ensureUserBusEnv();
+  const hadDefinition = existsSync(unitPath());
+  const wasEnabled = hadDefinition && (() => {
+    try { return sh(`systemctl --user is-enabled ${TASK}`) === "enabled"; } catch { return false; }
+  })();
+  const wasActive = hadDefinition && (() => {
+    try { return sh(`systemctl --user is-active ${TASK}`) === "active"; } catch { return false; }
+  })();
   withServiceTokenInstallTransaction(state => {
-    ensureUserBusEnv(); // reach the user bus over a bare SSH session (F9)
     const dir = unitDir();
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     recordOwnedConfigPath(getConfigDir(), serviceStatePath());
@@ -2018,6 +2144,19 @@ function installSystemd(): void {
     sh(`systemctl --user enable ${TASK}`);
     sh(`systemctl --user restart ${TASK}`);
     writeServiceInstallState();
+  }, {
+    serviceAssetPaths: [unitPath(), ...serviceStatePaths()],
+    restoreServiceDefinition: () => {
+      sh("systemctl --user daemon-reload");
+      if (!hadDefinition) {
+        try { sh(`systemctl --user disable --now ${TASK}`); } catch { /* absent */ }
+        return;
+      }
+      if (wasEnabled) sh(`systemctl --user enable ${TASK}`);
+      else try { sh(`systemctl --user disable ${TASK}`); } catch { /* already disabled */ }
+      if (wasActive) sh(`systemctl --user restart ${TASK}`);
+      else try { sh(`systemctl --user stop ${TASK}`); } catch { /* already stopped */ }
+    },
   });
 }
 function startSystemd(): void {

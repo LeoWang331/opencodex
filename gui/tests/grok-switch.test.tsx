@@ -88,6 +88,10 @@ async function mount() {
     root.render(<LanguageProvider><Grok apiBase="" /></LanguageProvider>);
   });
   await act(async () => { await new Promise(r => setTimeout(r, 50)); });
+  const expandAll = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+    .find(button => (button.textContent ?? "").includes("Expand all"));
+  if (!expandAll) throw new Error("expand-all button not found");
+  await act(async () => { expandAll.click(); });
 }
 
 function switchFor(id: string): HTMLButtonElement {
