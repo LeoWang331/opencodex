@@ -1,6 +1,5 @@
-import http, { type IncomingMessage, type RequestOptions } from "node:http";
+import http, { type ClientRequest, type IncomingMessage, type RequestOptions } from "node:http";
 import https from "node:https";
-import { once } from "node:events";
 
 export type PinnedAddress = { address: string; family: number };
 
@@ -15,6 +14,33 @@ export interface PinnedHttpRequestOptions {
 }
 
 export type PinnedHttpGetOptions = PinnedHttpRequestOptions;
+
+function waitForDrainOrClose(req: ClientRequest): Promise<boolean> {
+  if (req.destroyed) return Promise.resolve(false);
+  return new Promise<boolean>((resolve, reject) => {
+    const cleanup = () => {
+      req.off("drain", onDrain);
+      req.off("close", onClose);
+      req.off("error", onError);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve(true);
+    };
+    const onClose = () => {
+      cleanup();
+      resolve(false);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    req.once("drain", onDrain);
+    req.once("close", onClose);
+    req.once("error", onError);
+    if (req.destroyed) onClose();
+  });
+}
 
 /**
  * Send one request through a previously validated address. The original hostname
@@ -153,20 +179,32 @@ export function pinnedHttpRequest(
       request.signal.removeEventListener("abort", onAbort);
       fail(error);
     });
-    req.on("close", () => request.signal.removeEventListener("abort", onAbort));
+    let bodyReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    req.on("close", () => {
+      request.signal.removeEventListener("abort", onAbort);
+      void bodyReader?.cancel().catch(() => {});
+    });
     void (async () => {
       try {
         const reader = request.body?.getReader();
+        bodyReader = reader;
         if (reader) {
+          if (req.destroyed) {
+            await reader.cancel();
+            return;
+          }
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            if (!req.write(Buffer.from(value))) await once(req, "drain");
+            if (req.destroyed) break;
+            if (!req.write(Buffer.from(value)) && !await waitForDrainOrClose(req)) break;
           }
         }
-        req.end();
+        if (!req.destroyed) req.end();
       } catch (error) {
         fail(error);
+      } finally {
+        bodyReader = undefined;
       }
     })();
   });

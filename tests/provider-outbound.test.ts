@@ -128,6 +128,52 @@ describe("provider outbound GET transport", () => {
     }
   });
 
+  test("cancels a backpressured POST body when the peer rejects it early", async () => {
+    for (const key of proxyKeys) delete process.env[key];
+    const server = createServer((request, response) => {
+      request.pause();
+      response.writeHead(413).end();
+    });
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (!address || typeof address === "string") reject(new Error("missing server port"));
+        else resolve(address.port);
+      });
+    });
+    const closed = () => new Promise<void>(resolve => server.close(() => resolve()));
+    const cancelled = Promise.withResolvers<void>();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(1024 * 1024));
+      },
+      cancel() {
+        cancelled.resolve();
+      },
+    });
+
+    try {
+      const { pinnedHttpRequest } = await import("../src/lib/pinned-http");
+      const response = await pinnedHttpRequest(new Request(
+        `http://provider.example:${port}/v1/chat/completions`,
+        { method: "POST", body },
+      ), { address: "127.0.0.1", family: 4 }, {
+        discardNonSuccessBody: true,
+        idleTimeoutMs: 1_000,
+      });
+
+      expect(response.status).toBe(413);
+      const bodyReaderCancelled = await Promise.race([
+        cancelled.promise.then(() => true),
+        Bun.sleep(1_000).then(() => false),
+      ]);
+      expect(bodyReaderCancelled).toBe(true);
+    } finally {
+      await closed();
+    }
+  });
+
   test("pins direct transport when Bun has no proxy for the request protocol", async () => {
     const { providerOutboundGet } = await import("../src/lib/provider-outbound");
     const cases = [
